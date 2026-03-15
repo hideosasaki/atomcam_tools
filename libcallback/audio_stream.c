@@ -20,19 +20,37 @@ static int streamRunning = 0;
 static int streamFd = -1;
 static char streamPath[256];
 static int streamVolume = 40;
+static int streamAlaw = 0;  // 1 = decode a-law (PCMA) to s16le
+
+// A-law to 16-bit linear PCM decode
+static short alaw_decode(unsigned char alaw) {
+  alaw ^= 0x55;
+  int sign = alaw & 0x80;
+  int exponent = (alaw >> 4) & 0x07;
+  int mantissa = alaw & 0x0F;
+  int magnitude;
+  if(exponent == 0) {
+    magnitude = (mantissa << 4) + 8;
+  } else {
+    magnitude = ((mantissa << 4) + 0x108) << (exponent - 1);
+  }
+  return sign ? -magnitude : magnitude;
+}
 
 static void *AudioStreamThread(void *arg) {
 
   static const int bufLength = 640;
   unsigned char buf[bufLength];
 
-  printf("[astream] start: %s vol=%d\n", streamPath, streamVolume);
+  printf("[astream] start: %s vol=%d alaw=%d\n", streamPath, streamVolume, streamAlaw);
 
   while(streamRunning) {
+    // O_RDONLY blocks until a writer opens the FIFO.
+    // Use a FIFO keeper (sleep <> fifo) to avoid this block.
     int fd = open(streamPath, O_RDONLY);
     if(fd < 0) {
       fprintf(stderr, "[astream] open %s failed: %s\n", streamPath, strerror(errno));
-      usleep(500 * 1000);
+      usleep(1000 * 1000);
       continue;
     }
 
@@ -41,13 +59,31 @@ static void *AudioStreamThread(void *arg) {
     set_pa_mode(3);
 
     while(streamRunning) {
-      ssize_t size = read(fd, buf, bufLength);
-      if(size <= 0) {
-        if(size < 0 && errno == EINTR) continue;
-        break;
-      }
-      while(streamRunning && local_sdk_speaker_feed_pcm_data(buf, size)) {
-        usleep(10 * 1000);
+      if(streamAlaw) {
+        // a-law: read half the buffer (1 byte alaw -> 2 bytes PCM)
+        unsigned char alawBuf[bufLength / 2];
+        ssize_t size = read(fd, alawBuf, bufLength / 2);
+        if(size <= 0) {
+          if(size < 0 && errno == EINTR) continue;
+          break;
+        }
+        short *pcm = (short *)buf;
+        for(int i = 0; i < size; i++) {
+          pcm[i] = alaw_decode(alawBuf[i]);
+        }
+        int pcmSize = size * 2;
+        while(streamRunning && local_sdk_speaker_feed_pcm_data(buf, pcmSize)) {
+          usleep(10 * 1000);
+        }
+      } else {
+        ssize_t size = read(fd, buf, bufLength);
+        if(size <= 0) {
+          if(size < 0 && errno == EINTR) continue;
+          break;
+        }
+        while(streamRunning && local_sdk_speaker_feed_pcm_data(buf, size)) {
+          usleep(10 * 1000);
+        }
       }
     }
 
@@ -55,8 +91,8 @@ static void *AudioStreamThread(void *arg) {
     set_pa_mode(0);
 
     if(streamRunning) {
-      printf("[astream] source closed, reopening...\n");
-      usleep(100 * 1000);
+      printf("[astream] source closed, waiting for writer...\n");
+      usleep(5000 * 1000);  // 5秒待機してCPU負荷を抑制
     }
   }
 
@@ -103,7 +139,11 @@ char *AudioStream(int fd, char *tokenPtr) {
 
   p = strtok_r(NULL, " \t\r\n", &tokenPtr);
   streamVolume = 40;
+  streamAlaw = 0;
   if(p) streamVolume = atoi(p);
+
+  p = strtok_r(NULL, " \t\r\n", &tokenPtr);
+  if(p && !strcmp(p, "alaw")) streamAlaw = 1;
 
   streamRunning = 1;
   if(pthread_create(&streamThread, NULL, AudioStreamThread, NULL)) {

@@ -107,6 +107,14 @@ WEBRTC_ENABLE=$(awk -F "=" '/^WEBRTC_ENABLE *=/ {print $2}' $HACK_INI)
 [ "$HOMEKIT_SOURCE" = "" ] && exit 0
 [ "$HOMEKIT_ENABLE" = "on" -o "$RTMP_ENABLE" = "on" -o "$WEBRTC_ENABLE" = "on" ] || exit 0
 
+# backchannel: FIFO preparation and astream start
+if [ "$WEBRTC_ENABLE" = "on" ]; then
+  [ ! -p /tmp/audio_in.fifo ] && mkfifo /tmp/audio_in.fifo
+  # Keep FIFO open (RW) so neither reader nor writer blocks on open
+  sleep 86400 <> /tmp/audio_in.fifo &
+  echo "astream /tmp/audio_in.fifo 60 alaw" | nc localhost 4000 > /dev/null 2>&1 &
+fi
+
 # go2rtc config
 cat > $GO2RTC_CONFIG << EOF
 log:
@@ -126,6 +134,7 @@ streams:
     video0:
         - http://localhost/cgi-bin/get_jpeg.cgi
         - \${HOMEKIT_SOURCE:}#video=copy#audio=copy
+        - exec:/scripts/backchannel.sh#backchannel=1
 EOF
 
 option="-config $GO2RTC_CONFIG "

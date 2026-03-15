@@ -28,6 +28,18 @@
         console.log('audio tracks : ', stream.getAudioTracks());
         document.getElementById('video').srcObject = stream;
 
+        if (media.indexOf('microphone') >= 0) {
+          try {
+            const micStream = await navigator.mediaDevices.getUserMedia({audio: true});
+            micStream.getTracks().forEach(track => {
+              pc.addTransceiver(track, {direction: 'sendonly'});
+            });
+            console.log('microphone enabled');
+          } catch (e) {
+            console.error('microphone access denied:', e);
+          }
+        }
+
         return pc;
       }
 
@@ -61,7 +73,7 @@
       }
 
       const media = new URLSearchParams(location.search).get('media');
-      connect(media || 'video');
+      connect(media || 'video+audio+microphone');
     </script>
   </body>
 </html>
