@@ -6,20 +6,23 @@ AtomCamの公式アプリでサポートされている双方向会話機能を�
 ## 現状整理
 
 ### 実装済み
-- `aplay`コマンドによるWAVファイル再生（`local_sdk_speaker_feed_pcm_data()`）
+- `astream`コマンドによるFIFOベースのストリーミング再生（`local_sdk_speaker_feed_pcm_data()`）
+- a-lawデコード内蔵（go2rtcのPCMAをlibcallback内でs16leに変換）
 - マイクキャプチャ（`audio_callback.c`, ALSA loopback経由）
 - エコーキャンセル（IMP SDK `IMP_AI_EnableAec()`）
-- WebRTC配信（go2rtc v1.9.2, 受信専用）
+- WebRTC双方向配信（go2rtc v1.9.2 + backchannel）
 - 音声処理（ノイズ抑制、AGC等）
+- webrtc.htmlでのマイク送信（`getUserMedia()` + sendonly transceiver）
 
 ### 未実装
-- リアルタイム音声ストリーミング再生（ファイルではなくストリームからのスピーカー出力）
-- WebRTCの双方向化（現在`recvonly`固定）
-- go2rtcバックチャネル設定
+- Web UI統合（Setting.vueにマイク制御UI追加）
+- 遅延の最適化（現状約2秒）
+- 音質改善
 
-## アーキテクチャ（最終目標）
+## アーキテクチャ（実装済み）
 ```
-ブラウザMIC → WebRTC(sendrecv) → go2rtc → exec:ffmpeg(Opus→PCM 8kHz) → FIFO → libcallback → スピーカー
+ブラウザMIC → WebRTC(sendrecv) → go2rtc → exec:backchannel.sh(PCMA raw) → FIFO → astream(a-law decode) → スピーカー
+ATOMマイク → v4l2rtspserver(OPUS) → go2rtc → WebRTC → ブラウザスピーカー
 ```
 
 ## フェーズ分け
@@ -30,7 +33,7 @@ AtomCamの公式アプリでサポートされている双方向会話機能を�
 #### 1-1. `astream`コマンドの実装 — 完了
 - 新規ファイル: `libcallback/audio_stream.c`
 - FIFOからPCM(8kHz/16bit/mono)を読み続けてスピーカーに出力
-- コマンド: `astream <fifo_path> [volume]` / `astream stop` / `astream`(状態確認)
+- コマンド: `astream <fifo_path> [volume] [alaw]` / `astream stop` / `astream`(状態確認)
 - `command.c`のCommandTableに登録
 
 #### 1-2. 動作検証 — 完了
@@ -51,8 +54,6 @@ ssh atomcam 'echo "astream stop" | nc localhost 4000'
 #### 1-3. 確認結果
 - [x] FIFOからの連続読み込みでスピーカー出力が途切れないか → OK
 - [x] `local_sdk_speaker_feed_pcm_data()`のストリーミング呼び出しが安定するか → OK
-- [ ] 遅延はどの程度か（目標: 500ms以下） → 未計測
-- [ ] CPU負荷は許容範囲か → 未計測
 - [x] サイン波(440Hz)の再生 → OK
 - [x] MP3ファイルのストリーミング再生 → OK
 - [x] 停止コマンド → OK
@@ -73,44 +74,49 @@ ssh atomcam 'echo "astream stop" | nc localhost 4000'
 ### フェーズ2: go2rtcバックチャネル連携 — 完了 (2026-03-15)
 **目標**: go2rtcのexec:ソース経由でバックチャネル音声をFIFOに流す
 
-#### 2-1. go2rtc.yaml設定変更
-- `rtspserver.sh`でバックチャネル用exec:ソースを追加
-- FFmpegによるOpus→PCM 8kHz変換パイプライン
+#### 実装内容
+- `rtspserver.sh`: FIFO準備 + astream alaw自動起動 + go2rtc.yamlにbackchannel設定追加
+- `backchannel.sh`: go2rtcのstdinからPCMA rawデータをFIFOにcat（新規作成）
+- `audio_stream.c`: a-lawデコード機能追加、`alaw`オプション対応
+- ffmpegは不要（libcallback内でa-lawデコード）
 
-#### 2-2. 確認ポイント
+#### 確認結果
 - [x] go2rtcの`exec:`+`#backchannel=1`がMIPSEL環境で動作するか → OK
 - [x] go2rtcがPCMAをstdinに書き込む → OK
 - [x] FIFO経由でastream(alawデコード)からスピーカー出力されるか → OK
 - [x] 遅延・音質は実用レベルか → 遅延約2秒、音質はまあまあ（改善余地あり）
 - [x] WebRTC接続中の安定性 → OK（映像停止・ハングなし）
 
-### フェーズ3: WebRTC双方向化 — 完了 (2026-03-15)
-**目標**: ブラウザから双方向音声通話ができるようにする（フェーズ2と同時に実装）
+### フェーズ3: WebRTC双方向化 — 一部完了 (2026-03-15)
+**目標**: ブラウザから双方向音声通話ができるようにする
 
-#### 3-1. webrtc.html変更
-- `recvonly` → `sendrecv`
+#### 3-1. webrtc.html変更 — 完了
 - `getUserMedia()`でブラウザマイク取得
-- マイクON/OFFボタン
+- sendonly transceiverでマイク音声をgo2rtcに送信
+- デフォルトmediaを`video+audio+microphone`に変更
 
-#### 3-2. Web UI統合
-- Setting.vueにマイク制御UIを追加
+#### 3-2. Web UI統合 — 未着手
+- Setting.vueにマイク制御UIを追加（ON/OFFボタン等）
 
 ### フェーズ4: 品質改善
+- 遅延の最小化（現状約2秒 → 目標500ms以下）
 - エコーキャンセル（AEC）パラメータ調整（`IMP_AI_EnableAec()`は動作確認済み）
 - ノイズ抑制の最適化
-- 遅延の最小化
+- Web UI統合（フェーズ3-2）
 
 ## 技術メモ
 
 ### 重要なファイル
 | ファイル | 役割 |
 |---------|------|
-| `libcallback/audio_play.c` | 既存のWAV再生実装。`local_sdk_speaker_feed_pcm_data()`の使い方の参考 |
-| `libcallback/command.c` | コマンドインターフェース。新コマンド登録先 |
+| `libcallback/audio_stream.c` | FIFOストリーミング再生 + a-lawデコード |
+| `libcallback/audio_play.c` | 既存のWAV再生実装。参考実装 |
+| `libcallback/command.c` | コマンドインターフェース。astream登録先 |
 | `libcallback/audio_callback.c` | マイクキャプチャ。ALSAパターンの参考 |
 | `libcallback/audio_control.c` | 音声処理制御（AEC, AGC, NS等） |
-| `web/source/webrtc.html` | WebRTCクライアント |
-| `overlay_rootfs/scripts/rtspserver.sh` | go2rtc設定生成・起動 |
+| `overlay_rootfs/scripts/backchannel.sh` | go2rtcバックチャネル→FIFO |
+| `overlay_rootfs/scripts/rtspserver.sh` | go2rtc設定生成・FIFO準備・起動 |
+| `web/source/webrtc.html` | WebRTCクライアント（双方向対応） |
 | `custompackages/package/go2rtc/go2rtc.mk` | go2rtc v1.9.2ビルド設定 |
 
 ### スピーカー出力API
@@ -129,13 +135,21 @@ extern int local_sdk_speaker_set_pa_mode(int mode);        // PA制御
 - チャネル: 1 (mono)
 - バッファサイズ: 640バイト単位
 
+### go2rtcバックチャネルの仕組み
+- go2rtc v1.9.2: `#backchannel=1`付きexec:のstdinにPCMA rawデータを書き込む
+- WebRTCクライアントは`media=video+audio+microphone`パラメータでマイク有効化
+- HOMEKIT_SOURCEは`rtsp://localhost:8554/video0_unicast`
+- lighttpdはポート80、go2rtc APIはポート1984
+- `getUserMedia()`はHTTPS必須 → `atomcam.local`ホスト名でアクセス
+
 ## リスク・課題
-| 課題 | 深刻度 | 対策 |
+| 課題 | 深刻度 | 状態 |
 |------|--------|------|
-| go2rtc exec:+backchannel動作確認 | 高 | フェーズ1でストリーミング基盤を先に確立し、段階的に検証 |
-| Opus→PCM変換の遅延 | 中 | FFmpegの低遅延オプション |
-| エコーキャンセル | ~~中~~ 解決 | `audio aec on`で動作確認済み。パラメータ調整はフェーズ4 |
-| T31 CPU負荷 | 中 | PCM変換は軽量。実測で判断 |
+| go2rtc exec:+backchannel動作確認 | ~~高~~ | 解決済み |
+| Opus→PCM変換の遅延 | ~~中~~ | 解決（ffmpeg不要、libcallback内a-lawデコード） |
+| エコーキャンセル | ~~中~~ | 解決（`audio aec on`で動作確認済み） |
+| T31 CPU負荷 | 中 | WebRTC接続中load 7前後、切断後3前後に回復。許容範囲 |
+| 遅延（約2秒） | 中 | フェーズ4で改善予定 |
 
 ## 開発フロー（libcallback.soの差し替え手順）
 
@@ -158,6 +172,10 @@ docker compose exec builder bash -c "
   cd /tmp && rm -rf squashfs-root
   \$UNSQUASHFS /src/rootfs_hack.squashfs
   cp /src/libcallback/libcallback.so squashfs-root/lib/modules/libcallback.so
+  cp /src/overlay_rootfs/scripts/rtspserver.sh squashfs-root/scripts/rtspserver.sh
+  cp /src/overlay_rootfs/scripts/backchannel.sh squashfs-root/scripts/backchannel.sh
+  chmod +x squashfs-root/scripts/backchannel.sh
+  cp /src/web/source/webrtc.html squashfs-root/var/www/webrtc.html
   rm -f /src/rootfs_hack_new.squashfs
   \$MKSQUASHFS squashfs-root /src/rootfs_hack_new.squashfs -comp xz -noappend
 "
@@ -174,78 +192,34 @@ cp rootfs_hack_new.squashfs /Volumes/ATOMCAM/rootfs_hack.squashfs
     HostkeyAlgorithms +ssh-rsa
   ```
 
-## フェーズ2 実装ノート（2026-03-15 作業中）
+## 実装ノート
 
-### 実装済みの変更
-1. **`overlay_rootfs/scripts/backchannel.sh`** — go2rtcバックチャネル用スクリプト（新規作成）
-2. **`overlay_rootfs/scripts/rtspserver.sh`** — バックチャネル用exec:エントリとFIFO準備を追加
-3. **`web/source/webrtc.html`** — マイク送信(sendonly)トランシーバー追加、WebSocket URL修正
+### ffmpeg→FIFOの書き込みブロック問題と解決
 
-### 動作確認済み
-- go2rtcの`exec:#backchannel=1`でbackchannel.shが起動される → OK
-- go2rtcがブラウザのマイク音声をPCMA(alaw 8kHz)としてexecプロセスのstdinに書き込む → OK
-- ffmpegがstdinからPCMAを読み取り、s16leへの変換マッピングを認識する → OK
-- WebRTC映像配信（RTSPソース経由）は正常動作 → OK
-- ブラウザからのマイク許可はHTTPでは出ない → `atomcam.local`ホスト名でアクセスする必要あり
+初期実装ではbackchannel.shでffmpegを使いPCMA→s16le変換を行う予定だったが、
+go2rtcのstdoutキャプチャとFIFOのデッドロック問題により断念。
 
-### 未解決の問題: ffmpegからFIFOへの書き込みがブロック
+**解決策**: ffmpegを使わず、libcallback内にa-lawデコードを実装。
+backchannel.shは単純な`cat`でPCMA rawをFIFOに流し、astreamのalawオプションでデコード。
 
-**症状**: ffmpegが入力(pipe:0/pipe:3)を認識しOutputのマッピングも正しいが、出力先のFIFO(`/tmp/audio_in.fifo`)をopenする段階でブロックし、データが流れない。
+### astreamのreopenループ負荷
 
-**原因分析**:
-1. **go2rtcがstdoutをキャプチャする**: `exec:`で起動されたプロセスのstdoutはgo2rtcがパイプとして掴む。そのためシェルの`> /tmp/audio_in.fifo`リダイレクトが効かない（go2rtcのパイプが優先される）
-2. **FIFO openのデッドロック**: astream側は`open(fifo, O_RDONLY)`（ブロッキング）で書き手待ち。ffmpegの`open(fifo, O_WRONLY)`は読み手待ち。タイミングによってはデッドロックする
-3. **ffmpegのファイル存在チェック**: ffmpegは出力先が既に存在するとエラー終了する → `-y`フラグで回避可能
-4. **`sleep <> fifo`でFIFO keeperを仕込む**: RWでopenし続けるプロセスを追加すればblockは解消されるはずだが、実験ではffmpegが起動すらしなかった（原因不明）
+FIFOの書き手がいない状態でread()→EOF→close→reopen→...のループが
+CPU負荷を上げる問題があった。reopenの待機時間を5秒に設定して解決。
 
-**試したアプローチと結果**:
-| アプローチ | 結果 |
-|-----------|------|
-| `ffmpeg ... pipe:1 > /tmp/audio_in.fifo` | go2rtcがstdoutを掴むため、リダイレクトが効かない |
-| `ffmpeg ... /tmp/audio_in.fifo` (直接出力) | `File already exists. Exiting.` → `-y`で解消 |
-| `ffmpeg -y ... /tmp/audio_in.fifo` | FIFO openでブロック（読み手不在） |
-| `exec 3<&0; ffmpeg -y -i pipe:3 ... /tmp/audio_in.fifo` | 同上、FIFO openでブロック |
-| `sleep 86400 <> /tmp/audio_in.fifo &` (keeper) + 上記 | ffmpegが起動しなかった（原因不明） |
+### WebRTC接続中のSSH不安定
 
-### 解決: 案A+案Cの組み合わせで実装 (2026-03-15)
+WebRTC配信中はATOMのCPU/ネットワーク負荷が上がり、SSHがタイムアウトしやすい。
+デバッグ時はブラウザのタブを閉じてからSSH操作する。
 
-**FIFOブロック問題（案A）**:
-- `audio_stream.c`: `open(streamPath, O_RDONLY)` → `open(streamPath, O_RDONLY | O_NONBLOCK)` に変更
-- open後に`fcntl()`でO_NONBLOCKを外してブロッキングreadに戻す
-- これによりFIFOのopen()がデッドロックしなくなる
+### squashfsデプロイ時のoverlay反映
 
-**PCMA→s16le変換（案C）**:
-- `audio_stream.c`にa-lawデコード関数を追加
-- `astream`コマンドに`alaw`オプションを追加: `astream <path> <vol> alaw`
-- go2rtcのPCMAデータをffmpeg不要でそのままFIFOに流し、astream内でデコード
-- `backchannel.sh`: `exec cat > /tmp/audio_in.fifo`（stdoutを/dev/nullに閉じてからcat）
-
-**変更したファイル**:
-1. `libcallback/audio_stream.c` — O_NONBLOCK open + a-lawデコード + alawオプション
-2. `overlay_rootfs/scripts/backchannel.sh` — stdout閉じてcat→FIFO
-3. `overlay_rootfs/scripts/rtspserver.sh` — astream起動に`alaw`オプション追加
-
-### go2rtc関連の知見
-- go2rtc v1.9.2 バックチャネルの仕組み: `#backchannel=1`付きexec:のstdinにPCMA rawデータを書き込む
-- WebRTCクライアントは`media=video+audio+microphone`パラメータでマイク有効化
-- HOMEKIT_SOURCEは`rtsp://localhost:8554/video0_unicast`（`video0`ではない）
-- WebRTC接続中はATOMのCPU/ネットワーク負荷が高くSSHがタイムアウトしやすい
-- go2rtcのstatic_dirを`/tmp/www-backchannel`に変えてテスト用HTMLを配信可能（/var/wwwはsquashfs読み取り専用）
-- lighttpdはポート80、go2rtc APIはポート1984
-- `getUserMedia()`はHTTPS必須 → `atomcam.local`ホスト名か、Chromeフラグ`#unsafely-treat-insecure-origin-as-secure`で回避
-
-### ATOMデプロイのテスト手順（squashfs不要の方法）
-```bash
-# SDカードにスクリプト配置
-cat backchannel.sh | ssh atomcam 'cat > /media/mmc/backchannel.sh && chmod +x /media/mmc/backchannel.sh'
-# webrtc.htmlを/tmp/www-backchannel/に配置
-cat webrtc.html | ssh atomcam 'cat > /tmp/www-backchannel/index.html'
-# go2rtc設定を/tmp/に書いて起動（static_dir=/tmp/www-backchannel）
-# rtspserver.shの変更はgo2rtc.yamlを直接書くことで代替可能
-```
+squashfs再構築時は `rootfs_hack.squashfs`（元のベース）を展開した後、
+`overlay_rootfs/` のファイルを手動でコピーする必要がある。
+libcallback.soだけでなくスクリプトやHTMLも忘れずにコピーすること。
 
 ## 更新履歴
 - 2026-03-15: 初版作成。調査完了、フェーズ1着手開始
 - 2026-03-15: フェーズ1完了。astream コマンド実装・検証成功（サイン波、MP3ストリーミング再生確認）
 - 2026-03-15: フェーズ1+完了。双方向通話の基本検証成功（PC↔ATOM同時通話、AECによるエコー軽減確認）
-- 2026-03-15: フェーズ2完了。go2rtcバックチャネル連携実装。ブラウザ→ATOM双方向音声通話成功（遅延約2秒、安定動作確認）
+- 2026-03-15: フェーズ2+3完了。go2rtcバックチャネル連携 + WebRTC双方向化。ブラウザ↔ATOM双方向音声通話成功（遅延約2秒、安定動作確認）
