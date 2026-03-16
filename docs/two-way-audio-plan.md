@@ -102,7 +102,8 @@ ssh atomcam 'echo "astream stop" | nc localhost 4000'
 - 遅延の最小化（現状約2秒 → 目標500ms以下）
 - エコーキャンセル（AEC）パラメータ調整（`IMP_AI_EnableAec()`は動作確認済み）
 - ノイズ抑制の最適化
-- Web UI統合（フェーズ3-2）
+- HTTPS問題の解決
+- 起動時間の最小化
 
 ## 技術メモ
 

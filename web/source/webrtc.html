@@ -12,11 +12,62 @@
         height: 100%;
         width: 100%;
       }
+
+      #controls {
+        position: fixed;
+        bottom: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 10;
+      }
+      #mic-btn {
+        width: 56px;
+        height: 56px;
+        border-radius: 50%;
+        border: none;
+        cursor: pointer;
+        opacity: 0.8;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      #mic-btn svg {
+        width: 24px;
+        height: 24px;
+        fill: white;
+      }
+      #mic-btn:hover { opacity: 1; }
+      #mic-btn.off { background: #666; }
+      #mic-btn.on  { background: #bc423a; }
     </style>
   </head>
   <body>
     <video id="video" autoplay controls playsinline muted></video>
+    <div id="controls" style="display:none">
+      <button id="mic-btn" class="off" title="Microphone OFF"></button>
+    </div>
     <script>
+      let micTrack = null;
+      let micEnabled = false;
+      const micBtn = document.getElementById('mic-btn');
+      const controls = document.getElementById('controls');
+
+      const micOnIcon = '<svg viewBox="0 0 24 24"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>';
+      const micOffIcon = '<svg viewBox="0 0 24 24"><path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5c0-1.66-1.34-3-3-3S9 3.34 9 5v.18l5.98 5.99zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z"/></svg>';
+
+      function updateMicButton() {
+        micBtn.className = micEnabled ? 'on' : 'off';
+        micBtn.innerHTML = micEnabled ? micOnIcon : micOffIcon;
+        micBtn.title = micEnabled ? 'Microphone ON' : 'Microphone OFF';
+      }
+
+      micBtn.addEventListener('click', function() {
+        if (!micTrack) return;
+        micEnabled = !micEnabled;
+        micTrack.enabled = micEnabled;
+        updateMicButton();
+      });
+
       async function PeerConnection(media) {
         const pc = new RTCPeerConnection({
           iceServers: [{urls: 'stun:stun.l.google.com:19302'}]
@@ -25,16 +76,17 @@
           .filter(kind => media.indexOf(kind) >= 0)
           .map(kind => pc.addTransceiver(kind, {direction: 'recvonly'}).receiver.track);
         const stream = new MediaStream(tracks);
-        console.log('audio tracks : ', stream.getAudioTracks());
         document.getElementById('video').srcObject = stream;
 
         if (media.indexOf('microphone') >= 0) {
           try {
             const micStream = await navigator.mediaDevices.getUserMedia({audio: true});
-            micStream.getTracks().forEach(track => {
-              pc.addTransceiver(track, {direction: 'sendonly'});
-            });
-            console.log('microphone enabled');
+            micTrack = micStream.getTracks()[0];
+            micTrack.enabled = false;
+            pc.addTransceiver(micTrack, {direction: 'sendonly'});
+            controls.style.display = '';
+            micBtn.innerHTML = micOffIcon;
+            updateMicButton();
           } catch (e) {
             console.error('microphone access denied:', e);
           }
@@ -46,7 +98,7 @@
       async function connect(media) {
         const pc = await PeerConnection(media);
         const src = new URLSearchParams(location.search).get('src') || 'video0';
-        const url = new URL(`api/ws?src=${src}`, `${location.origin}:1984`);
+        const url = new URL(`api/ws?src=${src}`, `${location.protocol}//${location.hostname}:1984`);
         const ws = new WebSocket(url.toString().replace(/^http/, 'ws'));
 
         ws.addEventListener('open', () => {
@@ -73,7 +125,7 @@
       }
 
       const media = new URLSearchParams(location.search).get('media');
-      connect(media || 'video+audio+microphone');
+      connect(media || 'video');
     </script>
   </body>
 </html>
