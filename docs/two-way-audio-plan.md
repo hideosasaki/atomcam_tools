@@ -87,16 +87,23 @@ ssh atomcam 'echo "astream stop" | nc localhost 4000'
 - [x] 遅延・音質は実用レベルか → 遅延約2秒、音質はまあまあ（改善余地あり）
 - [x] WebRTC接続中の安定性 → OK（映像停止・ハングなし）
 
-### フェーズ3: WebRTC双方向化 — 一部完了 (2026-03-15)
+### フェーズ3: WebRTC双方向化 — 完了 (2026-03-15〜16)
 **目標**: ブラウザから双方向音声通話ができるようにする
 
-#### 3-1. webrtc.html変更 — 完了
+#### 3-1. webrtc.html変更 — 完了 (2026-03-15)
 - `getUserMedia()`でブラウザマイク取得
 - sendonly transceiverでマイク音声をgo2rtcに送信
-- デフォルトmediaを`video+audio+microphone`に変更
 
-#### 3-2. Web UI統合 — 未着手
-- Setting.vueにマイク制御UIを追加（ON/OFFボタン等）
+#### 3-2. Web UI統合 — 完了 (2026-03-16)
+- Setting.vueに「双方向会話」ON/OFFスイッチ追加（`WEBRTC_TWOWAY`設定、デフォルトOFF）
+- ONの場合、WebRTCUrlに`?media=video+audio+microphone`を付与
+- WebRTCがOFFまたはRTSP音声がOPUS以外の場合はdisabled
+- webrtc.htmlにマイクON/OFFボタン追加（SVGマイクアイコン、デフォルトミュート）
+- ボタンクリックで`track.enabled`トグル（re-negotiation不要）
+- WebSocket接続先URLのポート処理修正（`location.origin` → `location.hostname`）
+- webrtc.htmlのデフォルトmediaを`video`に変更（オリジナル互換）
+- i18n日英に双方向会話のラベル・ツールチップ追加
+- 設計方針: デフォルトOFF、OFFなら改修前と完全に同じコードパス（upstream PR向け）
 
 ### フェーズ4: 品質改善
 - 遅延の最小化（現状約2秒 → 目標500ms以下）
@@ -117,7 +124,10 @@ ssh atomcam 'echo "astream stop" | nc localhost 4000'
 | `libcallback/audio_control.c` | 音声処理制御（AEC, AGC, NS等） |
 | `overlay_rootfs/scripts/backchannel.sh` | go2rtcバックチャネル→FIFO |
 | `overlay_rootfs/scripts/rtspserver.sh` | go2rtc設定生成・FIFO準備・起動 |
-| `web/source/webrtc.html` | WebRTCクライアント（双方向対応） |
+| `web/source/webrtc.html` | WebRTCクライアント（双方向対応 + マイクボタンUI） |
+| `web/source/vue/Setting.vue` | 管理画面（双方向会話スイッチ + WebRTCUrl生成） |
+| `web/source/vue/i18n-ja.yaml` | 日本語ローカライズ |
+| `web/source/vue/i18n-en.yaml` | 英語ローカライズ |
 | `custompackages/package/go2rtc/go2rtc.mk` | go2rtc v1.9.2ビルド設定 |
 
 ### スピーカー出力API
@@ -141,7 +151,7 @@ extern int local_sdk_speaker_set_pa_mode(int mode);        // PA制御
 - WebRTCクライアントは`media=video+audio+microphone`パラメータでマイク有効化
 - HOMEKIT_SOURCEは`rtsp://localhost:8554/video0_unicast`
 - lighttpdはポート80、go2rtc APIはポート1984
-- `getUserMedia()`はHTTPS必須 → `atomcam.local`ホスト名でアクセス
+- `getUserMedia()`はSecure Context必須 → `localhost`（SSHポートフォワード）、`atomcam.local`(mDNS)、またはChromeフラグで対応
 
 ## リスク・課題
 | 課題 | 深刻度 | 状態 |
@@ -224,3 +234,4 @@ libcallback.soだけでなくスクリプトやHTMLも忘れずにコピーす�
 - 2026-03-15: フェーズ1完了。astream コマンド実装・検証成功（サイン波、MP3ストリーミング再生確認）
 - 2026-03-15: フェーズ1+完了。双方向通話の基本検証成功（PC↔ATOM同時通話、AECによるエコー軽減確認）
 - 2026-03-15: フェーズ2+3完了。go2rtcバックチャネル連携 + WebRTC双方向化。ブラウザ↔ATOM双方向音声通話成功（遅延約2秒、安定動作確認）
+- 2026-03-16: フェーズ3-2完了。Setting.vueに双方向会話スイッチ追加、webrtc.htmlにマイクON/OFFボタン追加（SVGアイコン）、デフォルトOFF設計
