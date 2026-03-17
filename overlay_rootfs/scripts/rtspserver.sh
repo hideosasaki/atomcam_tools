@@ -117,7 +117,8 @@ fi
 cat > $GO2RTC_CONFIG << EOF
 log:
     api: trace
-    streams: error
+    streams: trace
+    exec: trace
 api:
     origin: '*'
     static_dir: '/var/www-redirect'

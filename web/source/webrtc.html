@@ -48,6 +48,7 @@
     </div>
     <script>
       let micTrack = null;
+      let micSender = null;
       let micEnabled = false;
       const micBtn = document.getElementById('mic-btn');
       const controls = document.getElementById('controls');
@@ -70,12 +71,15 @@
       }
 
       micBtn.addEventListener('click', function() {
-        if (!micTrack) return;
+        if (!micTrack || !micSender) return;
         micEnabled = !micEnabled;
-        micTrack.enabled = micEnabled;
         if (micEnabled) {
           sendAstreamCmd('astream /tmp/audio_in.fifo 40 alaw');
+          micTrack.enabled = true;
+          micSender.replaceTrack(micTrack);
         } else {
+          micSender.replaceTrack(null);
+          micTrack.enabled = false;
           sendAstreamCmd('astream stop');
         }
         updateMicButton();
@@ -100,7 +104,8 @@
             }});
             micTrack = micStream.getTracks()[0];
             micTrack.enabled = false;
-            pc.addTransceiver(micTrack, {direction: 'sendonly'});
+            const transceiver = pc.addTransceiver('audio', {direction: 'sendonly'});
+            micSender = transceiver.sender;
             controls.style.display = '';
             micBtn.innerHTML = micOffIcon;
             updateMicButton();

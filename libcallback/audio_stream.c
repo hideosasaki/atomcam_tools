@@ -76,6 +76,8 @@ static void *AudioStreamThread(void *arg) {
       fcntl(fd, F_SETFL, flags);
     }
 
+    double openTime = getTimeMs();
+
     local_sdk_speaker_clean_buf_data();
     local_sdk_speaker_set_volume(streamVolume);
     set_pa_mode(3);
@@ -86,6 +88,11 @@ static void *AudioStreamThread(void *arg) {
     // the interval stabilizes (>15ms = real-time data arriving).
     int skipping = 1;
     double lastReadTime = 0;
+    double startTime = getTimeMs();
+    int firstRead = 1;
+    int skippedBytes = 0;
+    int skippedReads = 0;
+    int firstFeed = 1;
 
     logCount = 0;
     readTotal = feedTotal = feedRetryTotal = 0;
@@ -103,10 +110,28 @@ static void *AudioStreamThread(void *arg) {
           if(size < 0 && errno == EINTR) continue;
           break;
         }
+        if(firstRead) {
+          firstRead = 0;
+          FILE *mfp = fopen("/tmp/astream_measure.log", "a");
+          if(mfp) {
+            fprintf(mfp, "[measure] open=%.0f first_read=%.0f wait_ms=%.0f\n",
+                    openTime, t1, t1 - openTime);
+            fclose(mfp);
+          }
+        }
         if(skipping) {
+          skippedBytes += size;
+          skippedReads++;
           if(lastReadTime > 0 && (t1 - lastReadTime) > 15.0) {
             skipping = 0;
+            double skipEnd = t1;
             local_sdk_speaker_clean_buf_data();
+            FILE *mfp = fopen("/tmp/astream_measure.log", "a");
+            if(mfp) {
+              fprintf(mfp, "[measure] start=%.0f skip_done=%.0f skip_ms=%.0f skipped_bytes=%d skipped_reads=%d\n",
+                      startTime, skipEnd, skipEnd - startTime, skippedBytes, skippedReads);
+              fclose(mfp);
+            }
           } else {
             lastReadTime = t1;
             continue;
@@ -124,6 +149,16 @@ static void *AudioStreamThread(void *arg) {
         }
         double t2 = getTimeMs();
 
+        if(firstFeed) {
+          firstFeed = 0;
+          FILE *mfp = fopen("/tmp/astream_measure.log", "a");
+          if(mfp) {
+            fprintf(mfp, "[measure] first_feed=%.0f feed_ms=%.0f total_ms=%.0f retries=%d\n",
+                    t2, t2 - t1, t2 - startTime, retries);
+            fclose(mfp);
+          }
+        }
+
         readTotal += (t1 - t0);
         feedTotal += (t2 - t1);
         if(retries > 0) {
@@ -138,9 +173,18 @@ static void *AudioStreamThread(void *arg) {
           break;
         }
         if(skipping) {
+          skippedBytes += size;
+          skippedReads++;
           if(lastReadTime > 0 && (t1 - lastReadTime) > 15.0) {
             skipping = 0;
+            double skipEnd = t1;
             local_sdk_speaker_clean_buf_data();
+            FILE *mfp = fopen("/tmp/astream_measure.log", "a");
+            if(mfp) {
+              fprintf(mfp, "[measure] start=%.0f skip_done=%.0f skip_ms=%.0f skipped_bytes=%d skipped_reads=%d\n",
+                      startTime, skipEnd, skipEnd - startTime, skippedBytes, skippedReads);
+              fclose(mfp);
+            }
           } else {
             lastReadTime = t1;
             continue;
@@ -152,6 +196,16 @@ static void *AudioStreamThread(void *arg) {
           retries++;
         }
         double t2 = getTimeMs();
+
+        if(firstFeed) {
+          firstFeed = 0;
+          FILE *mfp = fopen("/tmp/astream_measure.log", "a");
+          if(mfp) {
+            fprintf(mfp, "[measure] first_feed=%.0f feed_ms=%.0f total_ms=%.0f retries=%d\n",
+                    t2, t2 - t1, t2 - startTime, retries);
+            fclose(mfp);
+          }
+        }
 
         readTotal += (t1 - t0);
         feedTotal += (t2 - t1);

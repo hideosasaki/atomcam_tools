@@ -121,32 +121,53 @@ ssh atomcam 'echo "astream stop" | nc localhost 4000'
 3. ブラウザ側AEC/NS/AGC無効化 — 完了 (2026-03-17)
    - `webrtc.html`: `getUserMedia`に`echoCancellation/noiseSuppression/autoGainControl: false`を指定
    - ATOM側で処理済みのため二重処理を排除（音質改善目的、遅延への効果は軽微）
-
 4. パイプライン遅延計測と初期バースト対策 — 完了 (2026-03-17)
    - `audio_stream.c`: 計測ログ追加（read_avg, feed_avg, feed_retry）→ `/tmp/astream_latency.log`に出力
    - 計測結果: astream側はread_avg=20ms, feed_avg=0.1ms, feed_retry=0で遅延なし
    - ボトルネック: 起動時にgo2rtcからデータが一気に到着しスピーカーバッファが詰まる（初回feed_retry=35/100, 650ms）
    - 対策: 時間ベースのバーストスキップ — read間隔が15ms以上に安定するまでデータを読み捨て
    - 結果: Mac→ATOM遅延が約2秒→約1秒に改善
+5. go2rtcバッファ削減パッチ適用 — 完了 (2026-03-17)
+   - `custompackages/package/go2rtc/0005-go2rtc-reduce-audio-buffer.patch`: 音声送信バッファ128→5パケットに削減
+   - パッチは実際のgo2rtc v1.9.2ソース（`pkg/core/track.go`の`bufSize`変数）に合わせて修正
+   - `build_squashfs.sh`: go2rtcバイナリのコピーステップを追加
+   - 効果の定量比較は未実施（後続の改善が支配的だったため）
+6. RTP送信制御によるFIFO蓄積防止 — 完了 (2026-03-17)
+   - **原因特定**: マイクOFF中もブラウザがsilenceフレームをRTP送信 → go2rtc → backchannel.sh(dd) → FIFOにデータ蓄積（最大1MB≒131秒分）→ マイクON時にastream起動で蓄積データに直面
+   - `webrtc.html`: `addTransceiver(micTrack)` → `addTransceiver('audio')` に変更（nullトラックで開始、RTP送信なし）
+   - `webrtc.html`: マイクON時に`sender.replaceTrack(micTrack)`、OFF時に`sender.replaceTrack(null)`（WebRTC標準API、re-negotiation不要）
+   - 効果: skipped_bytes 122KB→800Bに激減、astream側total_ms 1425ms→51msに改善
+7. astream起動順序の最適化 — 完了 (2026-03-17)
+   - **原因特定**: マイクONボタンでreplaceTrack→sendAstreamCmd(HTTP POST)の順だと、cmd.cgi経路の遅延（初回約10秒）がボトルネック
+   - `webrtc.html`: sendAstreamCmd→replaceTrackの順に変更（astream起動を先行、RTP送信を後で開始）
+   - 効果: astreamがFIFO待機中にHTTPの遅延を吸収。体感12秒→1秒以下に改善
 
 #### 試行して取りやめたステップ
 - `audio_stream.c`: `feed_pcm_data`リトライ間隔を10ms→2msに短縮 → 効果なし、取りやめ
+- `audio_stream.c`: FIFOフラッシュ後500ms時間ベーススキップ → readがブロッキングなので時間ベースが機能しない（read完了時点でskipUntilを過ぎている）、取りやめ
+- `audio_stream.c`: バイト数ベーススキップ（8000B→2000B） → go2rtcからのデータ供給がリアルタイムなのでリアルタイムデータまで読み捨ててしまい音が出なくなる、取りやめ
+- `audio_stream.c`: スキップ完全除去（FIFOフラッシュのみ） → ホットデプロイが効かず検証未完了
+
+#### 現在の状態 (2026-03-17)
+- SDデプロイ済み、起動OK、音OK
+- go2rtcバッファ削減パッチ適用済み（128→5パケット）
+- **Mac→ATOM音声遅延: 1秒以下**（初回・2回目とも）
+- astream計測値: 初回total_ms=51ms、2回目total_ms=18ms
+- ATOM起動直後のみRTSP接続タイムアウト（約30秒）で映像遅延あり（運用上許容）
+
+#### 次に試すべきアプローチ
+1. **go2rtcバッファパッチの効果検証** — バッファ128に戻して比較し、パッチが必要か判断
 
 #### 成果
-- Mac→ATOM音声遅延: 約1秒（ベースライン2秒から改善）
+- Mac→ATOM音声遅延: 1秒以下（初回・2回目とも）— 当初約5秒から大幅改善
 - ATOM→Mac遅延: 0.5秒以下で良好
-- マイクOFF時: astream停止、load 3.72（CPU節約）
-- マイクON時: astream起動、load 4.00
+- マイクOFF時: astream停止、RTP送信も停止（CPU・帯域節約）
+- マイクON時: astream起動→即再生
 - マイクボタンによるオンデマンド制御が正常動作
 
 #### 課題
-- Mac→ATOM遅延が目標500ms未達（現状約1秒）。残りはブラウザ→WebRTC→go2rtcの区間
-- ATOM側（astream）の遅延はほぼゼロに最適化済み
-
-#### 今後の検討ステップ
-1. go2rtcバックチャネルのバッファ設定調査（内部バッファリングの可能性）
-2. WebRTCのjitter buffer調査（ブラウザ側のバッファ）
-3. go2rtcを介さない直接パス（WebSocket等）の検討
+- ATOM起動直後のRTSP接続タイムアウト（運用上許容、起動後安定すれば問題なし）
+- go2rtcバッファパッチ（128→5）の効果が未検証（パッチなしでも十分な可能性）
 
 ### フェーズ4+: 音質・その他の品質改善
 - エコーキャンセル（AEC）パラメータ調整（`IMP_AI_EnableAec()`は動作確認済み）
@@ -216,33 +237,32 @@ extern int local_sdk_speaker_set_pa_mode(int mode);        // PA制御
 ATOMのルートファイルシステムはsquashfs（読み取り専用）のため、以下の手順で差し替える。
 
 ### ホットデプロイ（SD抜き差し不要）
-squashfsは読み取り専用だが、overlayfs上のファイルやtmpfsにコピーして差し替え可能。
-SDカード経由のデプロイはTrendMicroのスキャンでアンマウントが遅延するため、可能な限りSCP経由で直接差し替えること。
+**注意: libcallback.soのホットデプロイは機能しない。** iCameraはchroot(`/atom`)内から起動されるため、bind mountのパスが食い違う。`/lib/modules/libcallback.so`にbind mountしても、iCameraは`/atom/tmp/system/lib/modules/libcallback.so`（squashfs上、inode番号が異なる）を参照する。**libcallback.soの変更はSDデプロイ（squashfs再構築）が必須。**
 
+スクリプトやHTMLは直接上書き可能:
 ```bash
-# libcallback.so: /tmp経由で差し替え（実行中のiCameraは再起動必要）
-scp libcallback/libcallback.so atomcam:/tmp/
-ssh atomcam "cp /tmp/libcallback.so /lib/modules/libcallback.so"
-# iCamera再起動（WebRTCセッション切断に注意）
-ssh atomcam "killall iCamera_app"  # 自動再起動される
-
-# スクリプト: 直接上書き可能（overlayfs上）
 scp overlay_rootfs/scripts/backchannel.sh atomcam:/scripts/backchannel.sh
 scp web/source/webrtc.html atomcam:/var/www/webrtc.html
 ```
 
-**注意**: ホットデプロイは再起動すると元に戻る（squashfsが読み直されるため）。恒久化するにはSDカード経由でsquashfsを再構築すること。
+### SDカードのパーティション構成
+upstream release (Ver.2.5.5) のSDカードは2パーティション構成:
+- `BOOT` (FAT32): `factory_t31_ZMC6tiIDQN` のみ
+- `ATOMTOOLS` (FAT32): `rootfs_hack.squashfs`, `authorized_keys`, `hostname` 等
+
+デプロイ先は `/Volumes/ATOMTOOLS/rootfs_hack.squashfs`。
 
 ### SDカードデプロイ時の注意
-- コピー後、**10秒待ってから`diskutil unmount`する**（TrendMicroのスキャン完了を待つ）
-- 通常のunmountが失敗する場合は再度待ってリトライ。強制アンマウント(`force`)は最終手段
+- コピー後、`diskutil unmount /Volumes/ATOMTOOLS` と `diskutil unmount /Volumes/BOOT` の両方をアンマウント
+- `authorized_keys`は`docs/authorized_keys`からコピーすること
 
 ### ビルド
+**重要**: libcallback.soのビルドは必ずDockerコンテナ内で行うこと。ホスト（Mac）上ではクロスコンパイルできない。詳細はプロジェクトルートの `build.md` を参照。
+
 ```bash
 cd /Users/sasaki/GitHub/atomcam_tools
-docker compose up -d
-docker compose exec builder bash -c \
-  "cd /src/libcallback && CROSS_COMPILE=/atomtools/build/cross/mips-uclibc/bin/mipsel-ingenic-linux-uclibc- make"
+docker start atomcam_tools-builder-1  # コンテナが停止している場合
+docker exec atomcam_tools-builder-1 sh /src/build_libcallback.sh
 ```
 
 ### Webフロントエンドビルド（Setting.vue等を変更した場合）
@@ -253,31 +273,28 @@ rm -rf frontend
 ```
 
 ### デプロイ（squashfs再構築）
+`build_squashfs.sh`が全手順をまとめている。upstreamのsquashfsをベースに改修ファイルを上書きして再パックする。
+
 ```bash
-# SDカードをMacに挿した状態で
-docker compose exec builder bash -c "
-  UNSQUASHFS=/atomtools/build/buildroot-2016.02/output/host/usr/bin/unsquashfs
-  MKSQUASHFS=/atomtools/build/buildroot-2016.02/output/host/usr/bin/mksquashfs
-  cd /tmp && rm -rf squashfs-root
-  \$UNSQUASHFS /src/rootfs_hack.squashfs
-  # libcallback
-  cp /src/libcallback/libcallback.so squashfs-root/lib/modules/libcallback.so
-  # スクリプト
-  cp /src/overlay_rootfs/scripts/rtspserver.sh squashfs-root/scripts/rtspserver.sh
-  cp /src/overlay_rootfs/scripts/backchannel.sh squashfs-root/scripts/backchannel.sh
-  chmod +x squashfs-root/scripts/backchannel.sh
-  # Webフロントエンド（Setting.vue等のビルド済みファイル）
-  rm -f squashfs-root/var/www/bundle*
-  cp -pr /src/web/frontend/* squashfs-root/var/www/
-  # squashfs構築
-  rm -f /src/rootfs_hack_new.squashfs
-  \$MKSQUASHFS squashfs-root /src/rootfs_hack_new.squashfs -comp gzip -noappend
-"
-cp rootfs_hack_new.squashfs /Volumes/ATOMCAM/rootfs_hack.squashfs
+docker start atomcam_tools-builder-1
+docker exec atomcam_tools-builder-1 sh /src/build_libcallback.sh
+docker exec atomcam_tools-builder-1 sh /src/build_squashfs.sh
+# SDカードにコピー
+cp rootfs_hack_new.squashfs /Volumes/ATOMTOOLS/rootfs_hack.squashfs
+# MD5確認
+md5 /Volumes/ATOMTOOLS/rootfs_hack.squashfs
+md5 rootfs_hack_new.squashfs
+# アンマウント
+diskutil unmount /Volumes/ATOMTOOLS
+diskutil unmount /Volumes/BOOT
 ```
 
 ### 注意事項
-- **`atom_root.squashfs`は絶対に上書きしないこと**。これはATOM本体の公式ファームウェア（SPI Flashからコピーされたもの）であり、上書きするとATOMが起動しなくなる。デプロイ先は`rootfs_hack.squashfs`のみ。
+- **`build_squashfs.sh`は必ず`rm -rf /tmp/squashfs-root`してからunsquashfsすること**（`-f`で上書き展開すると前回のゴミファイルが残る。これが原因で起動不能になった）
+- **`lib32/modules/libcallback.so`にもコピーが必要**。iCameraはchroot内の`lib32`パスを参照する場合がある。`build_squashfs.sh`で`lib/modules`と`lib32/modules`の両方にコピーしている
+- **squashfs再構築時は必ず全ファイルをコピーすること**。libcallback.so、スクリプト、**Webフロントエンド（bundle*）**の3種を毎回コピーする。フロントエンドのコピーを忘れるとWebUIが動作しない
+- **ベースファイルは`rootfs_hack_upstream.squashfs`を使うこと**。これはupstream releaseからコピーしたオリジナル。`rootfs_hack_new.squashfs`（出力ファイル）をベースにすると、ゴミが蓄積して起動不能になる
+- **squashfsの圧縮形式は必ず gzip を使うこと**（`-comp gzip`）。カメラのカーネルがxzをサポートしていないため
 - **squashfsの圧縮形式は必ず gzip を使うこと**（`-comp gzip`）。元のrootfs_hack.squashfsがgzip圧縮であり、カメラのカーネルがxzをサポートしていないため、xzで構築すると起動しない。
 - デプロイ前に `rootfs_hack.squashfs` のバックアップを推奨
 - SDカードをATOMに戻して電源ONで反映される
