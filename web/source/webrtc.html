@@ -93,7 +93,11 @@
 
         if (media.indexOf('microphone') >= 0) {
           try {
-            const micStream = await navigator.mediaDevices.getUserMedia({audio: true});
+            const micStream = await navigator.mediaDevices.getUserMedia({audio: {
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false
+            }});
             micTrack = micStream.getTracks()[0];
             micTrack.enabled = false;
             pc.addTransceiver(micTrack, {direction: 'sendonly'});

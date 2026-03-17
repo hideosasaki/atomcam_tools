@@ -118,6 +118,12 @@ ssh atomcam 'echo "astream stop" | nc localhost 4000'
    - `rtspserver.sh`: astream自動起動を削除（マイクボタンからのオンデマンド起動に変更）
    - `audio_stream.c`: FIFO open時に蓄積データをフラッシュ（O_NONBLOCKで読み捨て）
    - `webrtc.html`: fetchのURLをポート80に明示（go2rtc 1984ポートからのCORS問題回避）
+3. ブラウザ側AEC/NS/AGC無効化 — 完了 (2026-03-17)
+   - `webrtc.html`: `getUserMedia`に`echoCancellation/noiseSuppression/autoGainControl: false`を指定
+   - ATOM側で処理済みのため二重処理を排除（音質改善目的、遅延への効果は軽微）
+
+#### 試行して取りやめたステップ
+- `audio_stream.c`: `feed_pcm_data`リトライ間隔を10ms→2msに短縮 → 効果なし、取りやめ
 
 #### 成果
 - Mac→ATOM音声遅延: 約2秒（ベースラインと同等、10秒→2秒にFIFOフラッシュで改善）
@@ -130,9 +136,8 @@ ssh atomcam 'echo "astream stop" | nc localhost 4000'
 - ATOM→Mac遅延は0.5秒以下で良好
 
 #### 今後の検討ステップ
-1. `audio_stream.c`: `feed_pcm_data`リトライ間隔を10ms→2msに短縮
-2. `webrtc.html`: ブラウザ側AEC/NS/AGCを無効化（ATOM側で処理済みのため二重処理を排除）
-3. `audio_stream.c`: スピーカーバッファクリアの最適化
+1. パイプライン各段の遅延計測（ボトルネック特定）
+2. `audio_stream.c`: スピーカーバッファクリアの最適化
 
 ### フェーズ4+: 音質・その他の品質改善
 - エコーキャンセル（AEC）パラメータ調整（`IMP_AI_EnableAec()`は動作確認済み）
@@ -286,3 +291,4 @@ libcallback.soだけでなくスクリプトやHTMLも忘れずにコピーす�
 - 2026-03-16: フェーズ3-2完了。Setting.vueに双方向会話スイッチ追加、webrtc.htmlにマイクON/OFFボタン追加（SVGアイコン）、デフォルトOFF設計
 - 2026-03-17: フェーズ4開始。ステップ1完了: backchannel.shのバッファリング除去（cat→dd bs=320）。ATOM→Mac遅延0.5秒以下、Mac→ATOM遅延約1秒。CPU load 3.3、idle 8%
 - 2026-03-17: フェーズ4ステップ2完了: マイクボタンによるastream制御。Mac→ATOM遅延約2秒（FIFOフラッシュで10秒→2秒に改善）。マイクOFF時load 3.72、ON時load 4.00。hack_ini.cgiのCONFIG_VER消失バグも修正
+- 2026-03-17: フェーズ4ステップ3完了: ブラウザ側AEC/NS/AGC無効化（音質改善、遅延効果は軽微）。feed_pcmリトライ間隔短縮は効果なく取りやめ
