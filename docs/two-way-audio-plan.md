@@ -13,9 +13,9 @@ AtomCamの公式アプリでサポートされている双方向会話機能を�
 - WebRTC双方向配信（go2rtc v1.9.2 + backchannel）
 - 音声処理（ノイズ抑制、AGC等）
 - webrtc.htmlでのマイク送信（`getUserMedia()` + sendonly transceiver）
+- Web UI統合（Setting.vueにマイク制御UI追加）
 
 ### 未実装
-- Web UI統合（Setting.vueにマイク制御UI追加）
 - 遅延の最適化（現状約2秒）
 - 音質改善
 
@@ -105,12 +105,28 @@ ssh atomcam 'echo "astream stop" | nc localhost 4000'
 - i18n日英に双方向会話のラベル・ツールチップ追加
 - 設計方針: デフォルトOFF、OFFなら改修前と完全に同じコードパス（upstream PR向け）
 
-### フェーズ4: 品質改善
-- 遅延の最小化（現状約2秒 → 目標500ms以下）
+### フェーズ4: 遅延の最小化・安定性向上
+**目標**: 遅延を約2秒→500ms以下に改善し、接続の安定性を向上させる
+
+段階的に1つずつ実施・検証する:
+1. `backchannel.sh`: `cat`→`dd bs=320`でバッファリング除去（5-20ms改善）
+2. `audio_stream.c`: FIFOを`O_RDONLY`→`O_RDWR`に変更し、EOF→5秒待機ループを根本解決
+3. `audio_stream.c`: `feed_pcm_data`リトライ間隔を10ms→2msに短縮
+4. `webrtc.html`: ブラウザ側AEC/NS/AGCを無効化（ATOM側で処理済みのため二重処理を排除）
+5. `audio_stream.c`: スピーカーバッファクリアの最適化
+
+### フェーズ4+: 音質・その他の品質改善
 - エコーキャンセル（AEC）パラメータ調整（`IMP_AI_EnableAec()`は動作確認済み）
 - ノイズ抑制の最適化
-- HTTPS問題の解決
 - 起動時間の最小化
+- WebRTCストリームのSub(360p)対応 — CPU負荷軽減のため。go2rtcにvideo2ストリームを追加定義し、Setting.vueでMain/Sub選択UIを追加。実際の負荷差は要検証
+
+## フェーズ5: リファクタリング
+- コードのふりかえり
+
+### フェーズ6: 運用構築
+- HTTPS問題の解決(tailscaleを活用?)
+- 最終的にHome Assistantから使えるように
 
 ## 技術メモ
 
@@ -174,6 +190,13 @@ docker compose exec builder bash -c \
   "cd /src/libcallback && CROSS_COMPILE=/atomtools/build/cross/mips-uclibc/bin/mipsel-ingenic-linux-uclibc- make"
 ```
 
+### Webフロントエンドビルド（Setting.vue等を変更した場合）
+```bash
+cd /Users/sasaki/GitHub/atomcam_tools/web
+rm -rf frontend
+./node_modules/.bin/webpack --mode production --progress
+```
+
 ### デプロイ（squashfs再構築）
 ```bash
 # SDカードをMacに挿した状態で
@@ -182,18 +205,25 @@ docker compose exec builder bash -c "
   MKSQUASHFS=/atomtools/build/buildroot-2016.02/output/host/usr/bin/mksquashfs
   cd /tmp && rm -rf squashfs-root
   \$UNSQUASHFS /src/rootfs_hack.squashfs
+  # libcallback
   cp /src/libcallback/libcallback.so squashfs-root/lib/modules/libcallback.so
+  # スクリプト
   cp /src/overlay_rootfs/scripts/rtspserver.sh squashfs-root/scripts/rtspserver.sh
   cp /src/overlay_rootfs/scripts/backchannel.sh squashfs-root/scripts/backchannel.sh
   chmod +x squashfs-root/scripts/backchannel.sh
-  cp /src/web/source/webrtc.html squashfs-root/var/www/webrtc.html
+  # Webフロントエンド（Setting.vue等のビルド済みファイル）
+  rm -f squashfs-root/var/www/bundle*
+  cp -pr /src/web/frontend/* squashfs-root/var/www/
+  # squashfs構築
   rm -f /src/rootfs_hack_new.squashfs
-  \$MKSQUASHFS squashfs-root /src/rootfs_hack_new.squashfs -comp xz -noappend
+  \$MKSQUASHFS squashfs-root /src/rootfs_hack_new.squashfs -comp gzip -noappend
 "
 cp rootfs_hack_new.squashfs /Volumes/ATOMCAM/rootfs_hack.squashfs
 ```
 
 ### 注意事項
+- **`atom_root.squashfs`は絶対に上書きしないこと**。これはATOM本体の公式ファームウェア（SPI Flashからコピーされたもの）であり、上書きするとATOMが起動しなくなる。デプロイ先は`rootfs_hack.squashfs`のみ。
+- **squashfsの圧縮形式は必ず gzip を使うこと**（`-comp gzip`）。元のrootfs_hack.squashfsがgzip圧縮であり、カメラのカーネルがxzをサポートしていないため、xzで構築すると起動しない。
 - デプロイ前に `rootfs_hack.squashfs` のバックアップを推奨
 - SDカードをATOMに戻して電源ONで反映される
 - SSH接続には `~/.ssh/config` に以下の設定が必要（OpenSSH 10.x + ATOMのOpenSSH 7.1の互換性問題）:
@@ -235,3 +265,4 @@ libcallback.soだけでなくスクリプトやHTMLも忘れずにコピーす�
 - 2026-03-15: フェーズ1+完了。双方向通話の基本検証成功（PC↔ATOM同時通話、AECによるエコー軽減確認）
 - 2026-03-15: フェーズ2+3完了。go2rtcバックチャネル連携 + WebRTC双方向化。ブラウザ↔ATOM双方向音声通話成功（遅延約2秒、安定動作確認）
 - 2026-03-16: フェーズ3-2完了。Setting.vueに双方向会話スイッチ追加、webrtc.htmlにマイクON/OFFボタン追加（SVGアイコン）、デフォルトOFF設計
+- 2026-03-17: フェーズ4開始。ステップ1完了: backchannel.shのバッファリング除去（cat→dd bs=320）。ATOM→Mac遅延0.5秒以下、Mac→ATOM遅延約1秒。CPU load 3.3、idle 8%

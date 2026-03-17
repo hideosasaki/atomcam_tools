@@ -8,4 +8,4 @@ FIFO=/tmp/audio_in.fifo
 # Close stdout (fd 1) so go2rtc's pipe capture doesn't interfere.
 # Use dd to write stdin directly to FIFO via fd redirection.
 exec 1>/dev/null
-exec cat <&0 > "$FIFO"
+exec dd bs=320 <&0 > "$FIFO" 2>/dev/null
