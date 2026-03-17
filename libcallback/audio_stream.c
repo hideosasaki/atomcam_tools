@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 
 extern int local_sdk_speaker_clean_buf_data();
 extern int local_sdk_speaker_set_volume(int volume);
@@ -37,10 +38,23 @@ static short alaw_decode(unsigned char alaw) {
   return sign ? -magnitude : magnitude;
 }
 
+// Latency measurement helpers
+static double getTimeMs(void) {
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  return tv.tv_sec * 1000.0 + tv.tv_usec / 1000.0;
+}
+
 static void *AudioStreamThread(void *arg) {
 
   static const int bufLength = 640;
   unsigned char buf[bufLength];
+
+  // Latency measurement state
+  int logCount = 0;
+  double readTotal = 0, feedTotal = 0, feedRetryTotal = 0;
+  int feedRetryCount = 0;
+  const int LOG_INTERVAL = 100; // log every 100 reads
 
   printf("[astream] start: %s vol=%d alaw=%d\n", streamPath, streamVolume, streamAlaw);
 
@@ -66,32 +80,99 @@ static void *AudioStreamThread(void *arg) {
     local_sdk_speaker_set_volume(streamVolume);
     set_pa_mode(3);
 
+    // Skip initial burst: go2rtc sends buffered data rapidly at start.
+    // Normal read interval is ~20ms (320 bytes at 8kHz alaw).
+    // Skip blocks while reads are too fast (burst), start playing once
+    // the interval stabilizes (>15ms = real-time data arriving).
+    int skipping = 1;
+    double lastReadTime = 0;
+
+    logCount = 0;
+    readTotal = feedTotal = feedRetryTotal = 0;
+    feedRetryCount = 0;
+
     while(streamRunning) {
+      double t0 = getTimeMs();
+
       if(streamAlaw) {
         // a-law: read half the buffer (1 byte alaw -> 2 bytes PCM)
         unsigned char alawBuf[bufLength / 2];
         ssize_t size = read(fd, alawBuf, bufLength / 2);
+        double t1 = getTimeMs();
         if(size <= 0) {
           if(size < 0 && errno == EINTR) continue;
           break;
+        }
+        if(skipping) {
+          if(lastReadTime > 0 && (t1 - lastReadTime) > 15.0) {
+            skipping = 0;
+            local_sdk_speaker_clean_buf_data();
+          } else {
+            lastReadTime = t1;
+            continue;
+          }
         }
         short *pcm = (short *)buf;
         for(int i = 0; i < size; i++) {
           pcm[i] = alaw_decode(alawBuf[i]);
         }
         int pcmSize = size * 2;
+        int retries = 0;
         while(streamRunning && local_sdk_speaker_feed_pcm_data(buf, pcmSize)) {
           usleep(10 * 1000);
+          retries++;
+        }
+        double t2 = getTimeMs();
+
+        readTotal += (t1 - t0);
+        feedTotal += (t2 - t1);
+        if(retries > 0) {
+          feedRetryCount++;
+          feedRetryTotal += retries * 10.0;
         }
       } else {
         ssize_t size = read(fd, buf, bufLength);
+        double t1 = getTimeMs();
         if(size <= 0) {
           if(size < 0 && errno == EINTR) continue;
           break;
         }
+        if(skipping) {
+          if(lastReadTime > 0 && (t1 - lastReadTime) > 15.0) {
+            skipping = 0;
+            local_sdk_speaker_clean_buf_data();
+          } else {
+            lastReadTime = t1;
+            continue;
+          }
+        }
+        int retries = 0;
         while(streamRunning && local_sdk_speaker_feed_pcm_data(buf, size)) {
           usleep(10 * 1000);
+          retries++;
         }
+        double t2 = getTimeMs();
+
+        readTotal += (t1 - t0);
+        feedTotal += (t2 - t1);
+        if(retries > 0) {
+          feedRetryCount++;
+          feedRetryTotal += retries * 10.0;
+        }
+      }
+
+      logCount++;
+      if(logCount >= LOG_INTERVAL) {
+        FILE *logfp = fopen("/tmp/astream_latency.log", "a");
+        if(logfp) {
+          fprintf(logfp, "[astream] latency: read_avg=%.1fms feed_avg=%.1fms feed_retry=%d/%d (%.0fms total)\n",
+                  readTotal / logCount, feedTotal / logCount,
+                  feedRetryCount, logCount, feedRetryTotal);
+          fclose(logfp);
+        }
+        logCount = 0;
+        readTotal = feedTotal = feedRetryTotal = 0;
+        feedRetryCount = 0;
       }
     }
 

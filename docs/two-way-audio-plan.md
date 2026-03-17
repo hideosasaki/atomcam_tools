@@ -122,22 +122,31 @@ ssh atomcam 'echo "astream stop" | nc localhost 4000'
    - `webrtc.html`: `getUserMedia`に`echoCancellation/noiseSuppression/autoGainControl: false`を指定
    - ATOM側で処理済みのため二重処理を排除（音質改善目的、遅延への効果は軽微）
 
+4. パイプライン遅延計測と初期バースト対策 — 完了 (2026-03-17)
+   - `audio_stream.c`: 計測ログ追加（read_avg, feed_avg, feed_retry）→ `/tmp/astream_latency.log`に出力
+   - 計測結果: astream側はread_avg=20ms, feed_avg=0.1ms, feed_retry=0で遅延なし
+   - ボトルネック: 起動時にgo2rtcからデータが一気に到着しスピーカーバッファが詰まる（初回feed_retry=35/100, 650ms）
+   - 対策: 時間ベースのバーストスキップ — read間隔が15ms以上に安定するまでデータを読み捨て
+   - 結果: Mac→ATOM遅延が約2秒→約1秒に改善
+
 #### 試行して取りやめたステップ
 - `audio_stream.c`: `feed_pcm_data`リトライ間隔を10ms→2msに短縮 → 効果なし、取りやめ
 
 #### 成果
-- Mac→ATOM音声遅延: 約2秒（ベースラインと同等、10秒→2秒にFIFOフラッシュで改善）
+- Mac→ATOM音声遅延: 約1秒（ベースライン2秒から改善）
+- ATOM→Mac遅延: 0.5秒以下で良好
 - マイクOFF時: astream停止、load 3.72（CPU節約）
 - マイクON時: astream起動、load 4.00
 - マイクボタンによるオンデマンド制御が正常動作
 
 #### 課題
-- Mac→ATOM遅延が目標500ms未達（現状約2秒）。go2rtcバックチャネルパイプラインの遅延が支配的
-- ATOM→Mac遅延は0.5秒以下で良好
+- Mac→ATOM遅延が目標500ms未達（現状約1秒）。残りはブラウザ→WebRTC→go2rtcの区間
+- ATOM側（astream）の遅延はほぼゼロに最適化済み
 
 #### 今後の検討ステップ
-1. パイプライン各段の遅延計測（ボトルネック特定）
-2. `audio_stream.c`: スピーカーバッファクリアの最適化
+1. go2rtcバックチャネルのバッファ設定調査（内部バッファリングの可能性）
+2. WebRTCのjitter buffer調査（ブラウザ側のバッファ）
+3. go2rtcを介さない直接パス（WebSocket等）の検討
 
 ### フェーズ4+: 音質・その他の品質改善
 - エコーキャンセル（AEC）パラメータ調整（`IMP_AI_EnableAec()`は動作確認済み）
@@ -205,6 +214,28 @@ extern int local_sdk_speaker_set_pa_mode(int mode);        // PA制御
 ## 開発フロー（libcallback.soの差し替え手順）
 
 ATOMのルートファイルシステムはsquashfs（読み取り専用）のため、以下の手順で差し替える。
+
+### ホットデプロイ（SD抜き差し不要）
+squashfsは読み取り専用だが、overlayfs上のファイルやtmpfsにコピーして差し替え可能。
+SDカード経由のデプロイはTrendMicroのスキャンでアンマウントが遅延するため、可能な限りSCP経由で直接差し替えること。
+
+```bash
+# libcallback.so: /tmp経由で差し替え（実行中のiCameraは再起動必要）
+scp libcallback/libcallback.so atomcam:/tmp/
+ssh atomcam "cp /tmp/libcallback.so /lib/modules/libcallback.so"
+# iCamera再起動（WebRTCセッション切断に注意）
+ssh atomcam "killall iCamera_app"  # 自動再起動される
+
+# スクリプト: 直接上書き可能（overlayfs上）
+scp overlay_rootfs/scripts/backchannel.sh atomcam:/scripts/backchannel.sh
+scp web/source/webrtc.html atomcam:/var/www/webrtc.html
+```
+
+**注意**: ホットデプロイは再起動すると元に戻る（squashfsが読み直されるため）。恒久化するにはSDカード経由でsquashfsを再構築すること。
+
+### SDカードデプロイ時の注意
+- コピー後、**10秒待ってから`diskutil unmount`する**（TrendMicroのスキャン完了を待つ）
+- 通常のunmountが失敗する場合は再度待ってリトライ。強制アンマウント(`force`)は最終手段
 
 ### ビルド
 ```bash
@@ -292,3 +323,4 @@ libcallback.soだけでなくスクリプトやHTMLも忘れずにコピーす�
 - 2026-03-17: フェーズ4開始。ステップ1完了: backchannel.shのバッファリング除去（cat→dd bs=320）。ATOM→Mac遅延0.5秒以下、Mac→ATOM遅延約1秒。CPU load 3.3、idle 8%
 - 2026-03-17: フェーズ4ステップ2完了: マイクボタンによるastream制御。Mac→ATOM遅延約2秒（FIFOフラッシュで10秒→2秒に改善）。マイクOFF時load 3.72、ON時load 4.00。hack_ini.cgiのCONFIG_VER消失バグも修正
 - 2026-03-17: フェーズ4ステップ3完了: ブラウザ側AEC/NS/AGC無効化（音質改善、遅延効果は軽微）。feed_pcmリトライ間隔短縮は効果なく取りやめ
+- 2026-03-17: フェーズ4ステップ4完了: 遅延計測＋初期バーストスキップ。astream側遅延ゼロ確認、起動時バースト対策で約2秒→約1秒に改善。残り1秒はWebRTC/go2rtc区間
