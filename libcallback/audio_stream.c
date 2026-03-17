@@ -54,6 +54,14 @@ static void *AudioStreamThread(void *arg) {
       continue;
     }
 
+    // Flush stale data accumulated in FIFO before we started
+    {
+      int flags = fcntl(fd, F_GETFL, 0);
+      fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+      while(read(fd, buf, bufLength) > 0) {}
+      fcntl(fd, F_SETFL, flags);
+    }
+
     local_sdk_speaker_clean_buf_data();
     local_sdk_speaker_set_volume(streamVolume);
     set_pa_mode(3);

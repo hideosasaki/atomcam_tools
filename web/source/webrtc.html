@@ -61,10 +61,23 @@
         micBtn.title = micEnabled ? 'Microphone ON' : 'Microphone OFF';
       }
 
+      function sendAstreamCmd(cmd) {
+        var url = location.protocol + '//' + location.hostname + '/cgi-bin/cmd.cgi?port=socket';
+        fetch(url, {
+          method: 'POST',
+          body: JSON.stringify({exec: cmd})
+        }).catch(function() {});
+      }
+
       micBtn.addEventListener('click', function() {
         if (!micTrack) return;
         micEnabled = !micEnabled;
         micTrack.enabled = micEnabled;
+        if (micEnabled) {
+          sendAstreamCmd('astream /tmp/audio_in.fifo 40 alaw');
+        } else {
+          sendAstreamCmd('astream stop');
+        }
         updateMicButton();
       });
 

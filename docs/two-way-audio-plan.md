@@ -108,12 +108,31 @@ ssh atomcam 'echo "astream stop" | nc localhost 4000'
 ### フェーズ4: 遅延の最小化・安定性向上
 **目標**: 遅延を約2秒→500ms以下に改善し、接続の安定性を向上させる
 
-段階的に1つずつ実施・検証する:
-1. `backchannel.sh`: `cat`→`dd bs=320`でバッファリング除去（5-20ms改善）
-2. `audio_stream.c`: FIFOを`O_RDONLY`→`O_RDWR`に変更し、EOF→5秒待機ループを根本解決
-3. `audio_stream.c`: `feed_pcm_data`リトライ間隔を10ms→2msに短縮
-4. `webrtc.html`: ブラウザ側AEC/NS/AGCを無効化（ATOM側で処理済みのため二重処理を排除）
-5. `audio_stream.c`: スピーカーバッファクリアの最適化
+**重要**: 必ず1ステップずつ実施→ビルド→デプロイ→検証の順で進めること。複数ステップを同時に変更しない（問題発生時に原因の切り分けができなくなるため）。
+
+**ビルド手順**: プロジェクトルートの `build.md` を参照。libcallback.soはuClibc環境（`/atomtools/build/cross/mips-uclibc/bin/mipsel-ingenic-linux-uclibc-`）でビルドすること。glibc版gcc（`mipsel-ingenic-linux-gnu-`）を使うとヘッダー不一致でエラーになる。
+#### 完了したステップ
+1. `backchannel.sh`: `cat`→`dd bs=320`でバッファリング除去 — 完了 (2026-03-17)
+2. マイクボタンによるastream制御 — 完了 (2026-03-17)
+   - `webrtc.html`: マイクON→`astream start`、OFF→`astream stop`をcmd.cgi経由で送信
+   - `rtspserver.sh`: astream自動起動を削除（マイクボタンからのオンデマンド起動に変更）
+   - `audio_stream.c`: FIFO open時に蓄積データをフラッシュ（O_NONBLOCKで読み捨て）
+   - `webrtc.html`: fetchのURLをポート80に明示（go2rtc 1984ポートからのCORS問題回避）
+
+#### 成果
+- Mac→ATOM音声遅延: 約2秒（ベースラインと同等、10秒→2秒にFIFOフラッシュで改善）
+- マイクOFF時: astream停止、load 3.72（CPU節約）
+- マイクON時: astream起動、load 4.00
+- マイクボタンによるオンデマンド制御が正常動作
+
+#### 課題
+- Mac→ATOM遅延が目標500ms未達（現状約2秒）。go2rtcバックチャネルパイプラインの遅延が支配的
+- ATOM→Mac遅延は0.5秒以下で良好
+
+#### 今後の検討ステップ
+1. `audio_stream.c`: `feed_pcm_data`リトライ間隔を10ms→2msに短縮
+2. `webrtc.html`: ブラウザ側AEC/NS/AGCを無効化（ATOM側で処理済みのため二重処理を排除）
+3. `audio_stream.c`: スピーカーバッファクリアの最適化
 
 ### フェーズ4+: 音質・その他の品質改善
 - エコーキャンセル（AEC）パラメータ調整（`IMP_AI_EnableAec()`は動作確認済み）
@@ -266,3 +285,4 @@ libcallback.soだけでなくスクリプトやHTMLも忘れずにコピーす�
 - 2026-03-15: フェーズ2+3完了。go2rtcバックチャネル連携 + WebRTC双方向化。ブラウザ↔ATOM双方向音声通話成功（遅延約2秒、安定動作確認）
 - 2026-03-16: フェーズ3-2完了。Setting.vueに双方向会話スイッチ追加、webrtc.htmlにマイクON/OFFボタン追加（SVGアイコン）、デフォルトOFF設計
 - 2026-03-17: フェーズ4開始。ステップ1完了: backchannel.shのバッファリング除去（cat→dd bs=320）。ATOM→Mac遅延0.5秒以下、Mac→ATOM遅延約1秒。CPU load 3.3、idle 8%
+- 2026-03-17: フェーズ4ステップ2完了: マイクボタンによるastream制御。Mac→ATOM遅延約2秒（FIFOフラッシュで10秒→2秒に改善）。マイクOFF時load 3.72、ON時load 4.00。hack_ini.cgiのCONFIG_VER消失バグも修正
