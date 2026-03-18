@@ -14,9 +14,6 @@ cp /src/overlay_rootfs/scripts/backchannel.sh /tmp/squashfs-root/scripts/backcha
 chmod +x /tmp/squashfs-root/scripts/backchannel.sh
 cp /src/overlay_rootfs/scripts/rtspserver.sh /tmp/squashfs-root/scripts/rtspserver.sh
 
-# webrtc.html
-cp /src/web/source/webrtc.html /tmp/squashfs-root/var/www/webrtc.html
-
 # hack_ini.cgi (CONFIG_VER fix)
 cp /src/overlay_rootfs/var/www/cgi-bin/hack_ini.cgi /tmp/squashfs-root/var/www/cgi-bin/hack_ini.cgi
 
