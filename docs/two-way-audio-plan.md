@@ -18,6 +18,7 @@ AtomCamの公式アプリでサポートされている双方向会話機能を�
 ### 未実装
 - 音質改善
 - go2rtcバッファパッチの効果検証（現在upstreamバッファサイズに戻して検証中）
+- PCMパスのdrain誤検出修正（フェーズ4のdrain機構追加以降、catやffmpegパイプでのPCM再生が動作しない）
 
 ## アーキテクチャ（実装済み）
 ```
@@ -201,10 +202,8 @@ webrtc.htmlに計測コード（performance.now()ベース）を追加して検�
 - 映像表示時間: 体感で若干の改善（初回7-10秒→約5秒）。残りの遅延はRTSP接続確立+WebRTCネゴシエーション自体の所要時間
 - CPU負荷: MJPEG除去の副次効果でWebRTC接続中のloadが~7→~4.8に改善
 
-## フェーズ5: リファクタリング — 進行中 (2026-03-18)
+## フェーズ5: リファクタリング — 完了 (2026-03-18)
 **目標**: フェーズ1〜4+で蓄積した技術的負債を解消し、保守性・信頼性を改善する
-
-**方針**: Step 3（alaw/PCMパス統合）以外を先に実施→動作確認→Step 3を実施
 
 #### 完了したステップ
 1. **audio_stream.c — 計測ログ除去** (~80行削減)
@@ -231,15 +230,82 @@ webrtc.htmlに計測コード（performance.now()ベース）を追加して検�
    - rtspserver.sh: コメントアウト行 `#/usr/bin/go2rtc $option -daemon` を削除
    - backchannel.sh: FIFO存在チェック `[ ! -p "$FIFO" ] && exit 1` を追加
 
-#### 未実施のステップ
-- **audio_stream.c — alaw/PCMパス統合** (~80行削減見込み): read+decode部分のみ分岐し、stale検出・drain・feed等の共通ロジックを1箇所に統合
+7. **audio_stream.c — alaw/PCMパス統合** (~30行削減)
+   - read+decode部分のみ `if(streamAlaw)` で分岐し、drain・feed・stale検出等の共通ロジックを1箇所に統合
+   - alaw（WebRTC経由）で動作確認済み
+
+#### 既知の課題
+- **PCMパスでdrain誤検出**: `cat`やffmpegパイプでPCMデータをFIFOに流すと、初回feedリトライ後にstale検出→drain→音声破棄される。フェーズ4のdrain機構追加時からの問題（リファクタリング起因ではない）。現在PCMパスの利用予定はないが、固定音再生等の将来用途に備え修正が必要
 
 #### 成果
-- audio_stream.c: 355行 → 276行（79行削減、コード重複はStep 3で解消予定）
+- audio_stream.c: 355行 → 244行（111行削減）
 
-### フェーズ6: 運用構築
-- HTTPS問題の解決(tailscaleを活用?)
-- 最終的にHome Assistantから使えるように
+### フェーズ6: 運用構築 — Home Assistant統合 + HTTPS対応 (2026-03-18)
+**目標**: HAダッシュボードからカメラ映像+双方向会話を使えるようにする。raspi上の他サービスも含めてHTTPS化。
+
+#### 環境
+- HAサーバー: Raspberry Pi (192.168.0.2)、HA Container (Docker, host network)、Tailscale稼働中
+- 同居サービス: pihole (v6, :8080)、Music Assistant (:8095)、dvd-stream-box (:5000)、nginx (:80, 静的サイト配信)
+- ATOMカメラ: 同一LAN、go2rtc v1.9.2、WebRTC双方向対応済み
+- アクセス元: 同一LAN内のPC/スマホ
+
+#### 方式: Caddy + pihole Local DNS
+```
+ブラウザ (LAN内)
+  │ HTTPS (*.home)
+  ▼
+Caddy (192.168.0.2:443) ── TLS終端、リバースプロキシ
+  ├── ha.home              → localhost:8123      (Home Assistant)
+  ├── atomcam.home         → <atomcam-ip>:80     (ATOM Web UI)
+  ├── ma.home              → localhost:8095      (Music Assistant)
+  ├── dvd.home             → localhost:5000      (dvd-stream-box)
+  └── pihole.home          → localhost:8080      (pihole v6)
+
+Caddy (192.168.0.2:1984) ── TLS終端（go2rtc WebSocket用）
+  └── atomcam.home:1984    → <atomcam-ip>:1984   (go2rtc API/WS)
+
+pihole Local DNS: *.home → 192.168.0.2
+```
+
+#### 選定理由
+- **webrtc.htmlの変更不要**: サブドメイン方式のため `location.protocol`/`location.hostname`がそのまま機能。`ws://`→`wss://`もlocation.protocolベースで自動判定済み（webrtc.html 127-128行目）
+- **一元管理**: Caddyfile 1ファイルで全サービスのHTTPS設定を管理
+- **Tailscale Serveは使わない**: パスベースのみ対応で管理が複雑になるため
+- TLS証明書: Caddyの自動自己署名証明書（`tls internal`）。LAN内プライベートドメインのためLE不可
+- Caddyは `default_bind 192.168.0.2` でLAN IPにバインド（Tailscaleの`:443`と共存）
+
+#### 完了したステップ
+1. **pihole Local DNSにレコード追加** — 完了
+   - ha.home, atomcam.home, ma.home, dvd.home, pihole.home → 192.168.0.2
+   - pihole v6 API (`PUT /api/config/dns/hosts/<ip>%20<domain>`) で登録
+2. **CaddyをDockerで起動** — 完了
+   - `~/homeassistant/docker-compose.yml` にcaddyサービス追加（`caddy:2`, host network）
+   - `~/homeassistant/Caddyfile` 作成（6サービス分のリバースプロキシ）
+   - 自己署名証明書の自動生成を確認
+3. **HA configuration.yaml修正** — 完了
+   - `trusted_proxies` に `::1` を追加（CaddyがIPv6 localhostからプロキシするため）
+4. **動作確認** — 部分完了
+   - ha.home: 200 OK
+   - ma.home: 200 OK
+   - dvd.home: 200 OK
+   - pihole.home: 403（正常、ログイン必要）
+   - atomcam.home: 未確認（ATOMカメラがOFF中）
+
+#### 残作業
+- ATOMカメラの電源ON後、IPアドレスを確認してCaddyfileを更新
+- `https://atomcam.home/webrtc.html?media=video+audio+microphone` でWebRTC双方向会話の動作確認
+- HAダッシュボードにiframeカード設置:
+  ```yaml
+  type: iframe
+  url: "https://atomcam.home/webrtc.html?media=video+audio+microphone"
+  aspect_ratio: "16:9"
+  ```
+- ブラウザでの自己署名証明書の例外承認（初回のみ）
+
+#### 今後の検討事項
+- nginx除去とCaddyへの統合（`/var/www/html`の静的サイト配信、aisegのクロス制限解除）
+- pihole Docker化
+- HA native統合（AlexxIT/WebRTCカード等。v4l2rtspserverにRTSPバックチャネルがないため技術的に不確実）
 
 ## 技術メモ
 
@@ -436,3 +502,4 @@ libcallback.soだけでなくスクリプトやHTMLも忘れずにコピーす�
 - 2026-03-18: cmd.cgi遅延を計測し問題解消を確認。前回の「1回目15秒無音」はsquashfs内のwebrtc.htmlがステップ6/7未反映だったことが原因。SDデプロイで恒久修正。フェーズ4完了（1回目~1秒、2回目以降~0.5秒）
 - 2026-03-18: フェーズ4+: WebRTC接続高速化。STUNサーバー除去（LAN内不要）、go2rtcストリームからMJPEGソース除去（無駄なプロデューサー起動・停止を排除）。映像表示時間が若干改善
 - 2026-03-18: フェーズ5前半: リファクタリング（Step 3以外）。audio_stream.c: 計測ログ除去(~80行)、名前付き定数導入、パラメータバリデーション、volatile追加（355→276行）。webrtc.html: エラーハンドリング改善、定数抽出。rtspserver.sh/backchannel.sh: デッドコード除去・FIFOチェック追加
+- 2026-03-18: フェーズ6着手: raspi上にCaddy（リバースプロキシ）+ pihole Local DNSで全サービスHTTPS化。pihole DNSにha/atomcam/ma/dvd/pihole.home登録、Caddyfile作成・Docker起動、HA trusted_proxiesに::1追加。ha/ma/dvd/pihole.homeの動作確認OK。atomcam.homeはATOM電源OFF中のため未確認。webrtc.htmlの変更不要（サブドメイン方式でlocation.protocol/hostnameがそのまま機能）

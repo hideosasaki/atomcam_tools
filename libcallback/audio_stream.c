@@ -97,103 +97,71 @@ static void *AudioStreamThread(void *arg) {
     double lastReadTime = 0;
 
     while(streamRunning) {
+      // Read + decode: only this part differs between alaw and PCM
+      ssize_t size;
+      int pcmSize;
       if(streamAlaw) {
-        // a-law: read half the buffer (1 byte alaw -> 2 bytes PCM)
         unsigned char alawBuf[ALAW_BUF_LEN];
-        ssize_t size = read(fd, alawBuf, ALAW_BUF_LEN);
-        double t1 = getTimeMs();
-        if(size <= 0) {
-          if(size < 0 && errno == EINTR) continue;
-          break;
-        }
-        if(firstRead) firstRead = 0;
-        // While draining, discard data until read interval > 15ms (real-time)
-        if(draining) {
-          skippedBytes += size;
-          skippedReads++;
-          if(lastReadTime > 0 && (t1 - lastReadTime) > DRAIN_THRESHOLD_MS) {
-            draining = 0;
-            local_sdk_speaker_clean_buf_data();
-            printf("[astream] drain done: skipped_bytes=%d skipped_reads=%d\n",
-                   skippedBytes, skippedReads);
-            skippedBytes = 0;
-            skippedReads = 0;
+        size = read(fd, alawBuf, ALAW_BUF_LEN);
+        if(size > 0) {
+          short *pcm = (short *)buf;
+          for(int i = 0; i < size; i++) {
+            pcm[i] = alaw_decode(alawBuf[i]);
           }
-          lastReadTime = t1;
-          continue;
+          pcmSize = size * 2;
         }
-        short *pcm = (short *)buf;
-        for(int i = 0; i < size; i++) {
-          pcm[i] = alaw_decode(alawBuf[i]);
-        }
-        int pcmSize = size * 2;
-        int retries = 0;
-        while(streamRunning && local_sdk_speaker_feed_pcm_data(buf, pcmSize)) {
-          usleep(FEED_RETRY_US);
-          retries++;
-        }
-
-        // If feed needed retries, speaker buffer is congested.
-        // Flush everything and enter drain mode.
-        if(retries > 0 && !firstFeed) {
-          local_sdk_speaker_clean_buf_data();
-          int flags = fcntl(fd, F_GETFL, 0);
-          fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-          int flushed = 0;
-          unsigned char tmpBuf[BUF_LENGTH];
-          while(read(fd, tmpBuf, BUF_LENGTH) > 0) flushed++;
-          fcntl(fd, F_SETFL, flags);
-          draining = 1;
-          lastReadTime = 0;
-          printf("[astream] stale detected: retries=%d flushed=%d\n", retries, flushed);
-          continue;
-        }
-
-        if(firstFeed) firstFeed = 0;
       } else {
-        ssize_t size = read(fd, buf, BUF_LENGTH);
-        double t1 = getTimeMs();
-        if(size <= 0) {
-          if(size < 0 && errno == EINTR) continue;
-          break;
-        }
-        if(firstRead) firstRead = 0;
-        if(draining) {
-          skippedBytes += size;
-          skippedReads++;
-          if(lastReadTime > 0 && (t1 - lastReadTime) > DRAIN_THRESHOLD_MS) {
-            draining = 0;
-            local_sdk_speaker_clean_buf_data();
-            printf("[astream] drain done: skipped_bytes=%d skipped_reads=%d\n",
-                   skippedBytes, skippedReads);
-            skippedBytes = 0;
-            skippedReads = 0;
-          }
-          lastReadTime = t1;
-          continue;
-        }
-        int retries = 0;
-        while(streamRunning && local_sdk_speaker_feed_pcm_data(buf, size)) {
-          usleep(FEED_RETRY_US);
-          retries++;
-        }
-
-        if(retries > 0 && !firstFeed) {
-          local_sdk_speaker_clean_buf_data();
-          int flags = fcntl(fd, F_GETFL, 0);
-          fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-          int flushed = 0;
-          unsigned char tmpBuf[BUF_LENGTH];
-          while(read(fd, tmpBuf, BUF_LENGTH) > 0) flushed++;
-          fcntl(fd, F_SETFL, flags);
-          draining = 1;
-          lastReadTime = 0;
-          printf("[astream] stale detected: retries=%d flushed=%d\n", retries, flushed);
-          continue;
-        }
-
-        if(firstFeed) firstFeed = 0;
+        size = read(fd, buf, BUF_LENGTH);
+        pcmSize = size;
       }
+
+      double t1 = getTimeMs();
+
+      if(size <= 0) {
+        if(size < 0 && errno == EINTR) continue;
+        break;
+      }
+      if(firstRead) firstRead = 0;
+
+      // While draining, discard data until read interval > 15ms (real-time)
+      if(draining) {
+        skippedBytes += size;
+        skippedReads++;
+        if(lastReadTime > 0 && (t1 - lastReadTime) > DRAIN_THRESHOLD_MS) {
+          draining = 0;
+          local_sdk_speaker_clean_buf_data();
+          printf("[astream] drain done: skipped_bytes=%d skipped_reads=%d\n",
+                 skippedBytes, skippedReads);
+          skippedBytes = 0;
+          skippedReads = 0;
+        }
+        lastReadTime = t1;
+        continue;
+      }
+
+      int retries = 0;
+      while(streamRunning && local_sdk_speaker_feed_pcm_data(buf, pcmSize)) {
+        usleep(FEED_RETRY_US);
+        retries++;
+      }
+
+      // If feed needed retries, speaker buffer is congested.
+      // Flush everything and enter drain mode.
+      if(retries > 0 && !firstFeed) {
+        local_sdk_speaker_clean_buf_data();
+        int flags = fcntl(fd, F_GETFL, 0);
+        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        int flushed = 0;
+        unsigned char tmpBuf[BUF_LENGTH];
+        while(read(fd, tmpBuf, BUF_LENGTH) > 0) flushed++;
+        fcntl(fd, F_SETFL, flags);
+        draining = 1;
+        lastReadTime = 0;
+        printf("[astream] stale detected: retries=%d flushed=%d\n", retries, flushed);
+        continue;
+      }
+
+      if(firstFeed) firstFeed = 0;
     }
 
     close(fd);
