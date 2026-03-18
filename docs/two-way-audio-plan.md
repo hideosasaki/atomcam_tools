@@ -143,6 +143,18 @@ ssh atomcam 'echo "astream stop" | nc localhost 4000'
    - `webrtc.html`: sendAstreamCmd→replaceTrackの順に変更（astream起動を先行、RTP送信を後で開始）
    - 効果: astreamがFIFO待機中にHTTPの遅延を吸収。体感12秒→1秒以下に改善
 
+8. 1回目セッションのFIFOバッファ蓄積問題の解決 — 完了 (2026-03-18)
+   - **原因特定**: WebRTC接続時にgo2rtcがbackchannel.shを起動し、ddがFIFOに常時書き込み。astream未起動中に蓄積されたstaleデータがマイクON時にスピーカーバッファを詰まらせていた（feed_retry=100/100が24バッチ以上継続）
+   - **試行した方式**:
+     - フラグファイルでbackchannel.shの書き込み先をゲート → マイクON直後に最大1秒の音声欠落が発生（ddのcount単位でしかフラグチェックできない）
+     - 時間ベーススキップ（first_read後500msデータ読み捨て） → 最初のreadがブロッキングで返った時点で既に500ms経過しスキップが機能しない（以前の知見と同じ）
+   - **採用した方式**: stale検出+drainモード
+     - feedでリトライ発生 → 即座にspeaker_clean_buf_data() + FIFOフラッシュ → drainモードに遷移
+     - drainモード: read間隔が15ms超（リアルタイムデータ）に安定するまでデータを読み捨て続ける
+     - staleデータをスピーカーに送り込まずに済むため、バッファ詰まりが解消
+   - **検証結果**: feed_retry=0/100（以前は100/100）、astream側total_ms=10ms（以前は5209ms）
+   - astream側のFIFO蓄積問題は解決。残る体感遅延はcmd.cgi HTTP POST遅延（別課題）
+
 #### 試行して取りやめたステップ
 - `audio_stream.c`: `feed_pcm_data`リトライ間隔を10ms→2msに短縮 → 効果なし、取りやめ
 - `audio_stream.c`: FIFOフラッシュ後500ms時間ベーススキップ → readがブロッキングなので時間ベースが機能しない（read完了時点でskipUntilを過ぎている）、取りやめ
@@ -151,23 +163,27 @@ ssh atomcam 'echo "astream stop" | nc localhost 4000'
 
 #### 現在の状態 (2026-03-18)
 - go2rtcバッファパッチは不要と判断し除去。upstream状態（bufferSize=100）で運用
-- **Mac→ATOM音声遅延: 0.5〜1秒**（2回目セッション以降）
-- **1回目セッションの遅延問題が未解決**: ATOM起動後の最初のマイクONで大量のstaleデータがスピーカーバッファに流入（feed_retry=100/100）。2回目以降は正常
-- 原因: backchannel.sh（dd）がFIFOに常時書き込んでおり、astream未起動中にデータが蓄積される
+- 1回目セッションのFIFOバッファ蓄積問題は**解決済み**（astream側feed_retry=0）
+- **Mac→ATOM音声遅延**: astream側は正常（total_ms=10ms）。体感遅延（1回目15秒、2回目5秒、3回目以降正常）はcmd.cgi HTTP POST遅延が原因
+- ATOM→Mac遅延: 0.5秒以下で良好
 
 #### 次に試すべきアプローチ
-1. **1回目セッションのFIFOバッファ蓄積問題の解決** — backchannel.shの書き込みタイミング制御、またはastream側のフラッシュ強化
+1. **cmd.cgi HTTP POST遅延の解決** — マイクONボタン→astream起動までの時間短縮
+   - 原因: lighttpdがCGIプロセスをfork→ncでポート4000接続→libcallbackが処理、のパイプラインが初回〜2回目で遅い（WebRTC配信中のCPU負荷が影響）
+   - 候補A: webrtc.htmlからポート4000に直接TCP/WebSocket接続してastream制御（cmd.cgiをバイパス）
+   - 候補B: astream常時起動に戻し、stale対策（現在の実装）に任せる
+   - 候補C: webrtc.htmlに計測コードを追加し、ブラウザ側の遅延内訳を正確に把握してから対策
 
 #### 成果
-- Mac→ATOM音声遅延: 1秒以下（初回・2回目とも）— 当初約5秒から大幅改善
+- Mac→ATOM音声遅延: astream内部は10ms以下 — FIFOバッファ蓄積問題を完全に解消
 - ATOM→Mac遅延: 0.5秒以下で良好
 - マイクOFF時: astream停止、RTP送信も停止（CPU・帯域節約）
-- マイクON時: astream起動→即再生
+- マイクON時: astream起動→stale自動リカバリ→即再生
 - マイクボタンによるオンデマンド制御が正常動作
 
 #### 課題
 - ATOM起動直後のRTSP接続タイムアウト（運用上許容、起動後安定すれば問題なし）
-- **1回目セッションのFIFOバッファ蓄積問題**: backchannel.sh（dd）がastream未起動中もFIFOに書き込み続け、最初のマイクON時にstaleデータが大量にスピーカーに流入する。2回目以降は正常
+- **cmd.cgi HTTP POST遅延**: マイクONボタン押下→astream起動までの遅延（1回目約10〜15秒、2回目約5秒、3回目以降は正常）。astream側ではなくHTTP経路の問題
 
 ### フェーズ4+: 音質・その他の品質改善
 - エコーキャンセル（AEC）パラメータ調整（`IMP_AI_EnableAec()`は動作確認済み）
@@ -373,3 +389,4 @@ libcallback.soだけでなくスクリプトやHTMLも忘れずにコピーす�
 - 2026-03-17: フェーズ4ステップ3完了: ブラウザ側AEC/NS/AGC無効化（音質改善、遅延効果は軽微）。feed_pcmリトライ間隔短縮は効果なく取りやめ
 - 2026-03-17: フェーズ4ステップ4完了: 遅延計測＋初期バーストスキップ。astream側遅延ゼロ確認、起動時バースト対策で約2秒→約1秒に改善。残り1秒はWebRTC/go2rtc区間
 - 2026-03-18: go2rtcバッファパッチ(0005)を除去。bufferSize=5 vs 100を比較し、パッチは不要と結論。ビルド手順を精査・整理。1回目セッションのFIFOバッファ蓄積問題を新たに特定（backchannel.shの常時書き込みが原因）
+- 2026-03-18: フェーズ4ステップ8完了: 1回目セッションのFIFOバッファ蓄積問題を解決。stale検出+drainモード方式を採用（feedリトライ検出→speaker_clean+FIFOフラッシュ→read間隔安定まで読み捨て）。astream側feed_retry=0、total_ms=10msに改善。残る体感遅延（1回目15秒、2回目5秒）はcmd.cgi HTTP POST遅延が原因と特定
