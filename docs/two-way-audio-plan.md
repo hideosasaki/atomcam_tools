@@ -507,3 +507,26 @@ libcallback.soだけでなくスクリプトやHTMLも忘れずにコピーす�
 - 2026-03-18: フェーズ5前半: リファクタリング（Step 3以外）。audio_stream.c: 計測ログ除去(~80行)、名前付き定数導入、パラメータバリデーション、volatile追加（355→276行）。webrtc.html: エラーハンドリング改善、定数抽出。rtspserver.sh/backchannel.sh: デッドコード除去・FIFOチェック追加
 - 2026-03-18: フェーズ6着手: raspi上にCaddy（リバースプロキシ）+ pihole Local DNSで全サービスHTTPS化。pihole DNSにha/atomcam/ma/dvd/pihole.home登録、Caddyfile作成・Docker起動、HA trusted_proxiesに::1追加。ha/ma/dvd/pihole.homeの動作確認OK。atomcam.homeはATOM電源OFF中のため未確認。webrtc.htmlの変更不要（サブドメイン方式でlocation.protocol/hostnameがそのまま機能）
 - 2026-03-18: フェーズ6完了: CaddyルートCA証明書をMacに登録（保護されていない通信の警告解消）。ATOM電源ON→atomcam.homeでWebRTC双方向会話動作確認。静的サイトをwww.homeに移行（file_server browse）。HAダッシュボード統合はカスタムカード（atomcam-card.js）で実現（標準iframeカードはallow="microphone"未対応、panel_iframeはHA 2026.2で廃止）。HAから映像+双方向会話の動作確認完了
+- 2026-03-18: フェーズ6+: HAアプリ対応の試行と最終アーキテクチャ決定。以下の経緯を経て構成を確定:
+  1. **自己署名証明書+サブドメインの限界**: Caddy自己署名CA証明書はMacでは手動インストールで動作したが、Android HAアプリはuser-installed CAを信頼しない（Android 7.0+のnetwork_security_config制約、HA Companion AppのGitHub Issue #5735）。Mac HAアプリのWKWebViewはクロスオリジンiframeで自己署名証明書を拒否
+  2. **Tailscale HTTPS移行**: `tailscale cert home.barn-alpha.ts.net`で正規Let's Encrypt証明書を取得。サブドメイン(*.home)を廃止し、パスベースルーティングに統一。Caddyのdefault_bindにLAN IP + Tailscale IPを追加。pihole Local DNSでLAN内はLAN IP直接アクセス
+  3. **Tailscale Serve競合**: tailscaled が Tailscale IP:443をlistenしていたためCaddyがbindできず。`tailscale serve reset`で解決
+  4. **HAカスタムカード方式の試行**:
+     - HA標準iframeカード → `allow="microphone"`属性なしでgetUserMediaブロック
+     - `panel_iframe` → HA 2026.2.3で廃止済み
+     - iframe付きカスタムカード(atomcam-card.js) → Chromeで動作したがWKWebView/WebViewで制約あり
+     - AlexxIT/WebRTCカード → マイクトグルUIなし（常時ON）、音量制御なし、UX不適合
+     - **最終採用: 直接WebRTCカスタムカード** — iframeを廃止し、カード内で直接RTCPeerConnection+WebSocket接続。同一オリジンなのでCORS問題なし
+  5. **プラットフォーム別の制約と結果**:
+     - Chrome (Mac/Android): 映像+音声+マイク 全てOK ✓
+     - Mac HAアプリ (WKWebView): RTCPeerConnectionが存在しない → WebRTC不可 ✗
+     - Android HAアプリ (WebView): WebRTCは動作するがgetUserMediaがpending（WebView内のマイク許可ダイアログが出ない）→ 映像+音声のみ、マイク不可 △
+     - Fully Kiosk Browser (Android): Enable Microphone Access (PLUS)設定で全機能動作 ✓
+  6. **getUserMedia関連の修正**:
+     - awaitをやめてPromise(.then)に変更 — WKWebViewでawaitが永遠に返らない問題を回避
+     - さらにlazy方式に変更 — マイクボタン初回押下時にgetUserMediaを呼び出し。接続確立をブロックしない
+     - sendonly transceiverを事前作成 — SDP negotiation時にバックチャネルのメディア記述を含める。後からaddTransceiverするとSDP再ネゴシエーションが必要で音が出なかった
+  7. **base_url設定追加**: HAアプリのWebViewではlocation.hostがHA内部アドレス(192.168.0.2:8123)を返す。config.base_urlでWebSocket/fetch先のオリジンを明示的に指定可能に
+  8. **fullscreen.html作成**: Fully Kiosk Browser用のフルスクリーンページ。音量ボタン廃止、マイクON=音量100%/OFF=ミュートのシンプルUI。大きなマイクボタン(112px)
+  9. **ATOMスピーカー音量**: DEFAULT_VOL=40→100に変更（local_sdk_speaker_set_volume、範囲0-100）
+  10. **Caddyfile handle→handle_path移行**: 末尾スラッシュなしURL(/atomcam, /dvd等)の404問題を修正
