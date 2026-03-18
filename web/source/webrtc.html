@@ -39,10 +39,19 @@
       #mic-btn:hover { opacity: 1; }
       #mic-btn.off { background: #666; }
       #mic-btn.on  { background: #bc423a; }
+      #mic-btn.connecting {
+        background: #bc423a;
+        animation: pulse 1.2s ease-in-out infinite;
+        pointer-events: none;
+      }
+      @keyframes pulse {
+        0%, 100% { opacity: 0.4; }
+        50% { opacity: 0.9; }
+      }
     </style>
   </head>
   <body>
-    <video id="video" autoplay controls playsinline muted></video>
+    <video id="video" autoplay playsinline muted></video>
     <div id="controls" style="display:none">
       <button id="mic-btn" class="off" title="Microphone OFF"></button>
     </div>
@@ -68,25 +77,35 @@
 
       function sendAstreamCmd(cmd) {
         var url = location.protocol + '//' + location.hostname + '/cgi-bin/cmd.cgi?port=socket';
-        fetch(url, {
+        return fetch(url, {
           method: 'POST',
           body: JSON.stringify({exec: cmd})
-        }).catch(function(e) { console.warn('[astream]', cmd, e); });
+        });
       }
 
       micBtn.addEventListener('click', function() {
         if (!micTrack || !micSender) return;
-        micEnabled = !micEnabled;
         if (micEnabled) {
-          sendAstreamCmd('astream ' + AUDIO_FIFO + ' ' + DEFAULT_VOL + ' alaw');
-          micTrack.enabled = true;
-          micSender.replaceTrack(micTrack);
-        } else {
+          micEnabled = false;
           micSender.replaceTrack(null);
           micTrack.enabled = false;
-          sendAstreamCmd('astream stop');
+          updateMicButton();
+          sendAstreamCmd('astream stop').catch(function(e) {
+            console.warn('[astream] stop', e);
+          });
+        } else {
+          micBtn.className = 'connecting';
+          micBtn.innerHTML = micOnIcon;
+          sendAstreamCmd('astream ' + AUDIO_FIFO + ' ' + DEFAULT_VOL + ' alaw').then(function() {
+            micEnabled = true;
+            micTrack.enabled = true;
+            micSender.replaceTrack(micTrack);
+            updateMicButton();
+          }).catch(function(e) {
+            console.warn('[astream] start', e);
+            updateMicButton();
+          });
         }
-        updateMicButton();
       });
 
       async function PeerConnection(media) {
