@@ -164,18 +164,24 @@ ssh atomcam 'echo "astream stop" | nc localhost 4000'
 #### 現在の状態 (2026-03-18)
 - go2rtcバッファパッチは不要と判断し除去。upstream状態（bufferSize=100）で運用
 - 1回目セッションのFIFOバッファ蓄積問題は**解決済み**（astream側feed_retry=0）
-- **Mac→ATOM音声遅延**: astream側は正常（total_ms=10ms）。体感遅延（1回目15秒、2回目5秒、3回目以降正常）はcmd.cgi HTTP POST遅延が原因
+- cmd.cgi HTTP POST遅延の計測を実施し、問題が解消していることを確認
+- **Mac→ATOM音声遅延**: 1回目約1秒（fetch 420ms）、2回目以降約0.5秒（fetch 204ms）で実用レベル
 - ATOM→Mac遅延: 0.5秒以下で良好
+- **フェーズ4の遅延改善は完了**
 
-#### 次に試すべきアプローチ
-1. **cmd.cgi HTTP POST遅延の解決** — マイクONボタン→astream起動までの時間短縮
-   - 原因: lighttpdがCGIプロセスをfork→ncでポート4000接続→libcallbackが処理、のパイプラインが初回〜2回目で遅い（WebRTC配信中のCPU負荷が影響）
-   - 候補A: webrtc.htmlからポート4000に直接TCP/WebSocket接続してastream制御（cmd.cgiをバイパス）
-   - 候補B: astream常時起動に戻し、stale対策（現在の実装）に任せる
-   - 候補C: webrtc.htmlに計測コードを追加し、ブラウザ側の遅延内訳を正確に把握してから対策
+#### cmd.cgi HTTP POST遅延の計測結果 (2026-03-18)
+webrtc.htmlに計測コード（performance.now()ベース）を追加して検証:
+| 操作 | fetch時間 | 体感遅延 |
+|------|-----------|----------|
+| 1回目 start | 420ms | ~1秒 |
+| 1回目 stop | 5045ms | - |
+| 2回目 start | 204ms | ~0.5秒 |
+| 2回目 stop | 62ms | - |
+
+前回セッションで「1回目15秒無音」だった原因は、squashfs内のwebrtc.htmlがステップ6/7の変更（nullトラックによるRTP送信制御、astream起動順序最適化）を含んでいなかったため。bind mountで最新版に差し替えたところ正常動作を確認。SDデプロイ（squashfs再構築）で恒久的に修正済み。
 
 #### 成果
-- Mac→ATOM音声遅延: astream内部は10ms以下 — FIFOバッファ蓄積問題を完全に解消
+- Mac→ATOM音声遅延: 1回目約1秒、2回目以降約0.5秒 — 実用レベル達成
 - ATOM→Mac遅延: 0.5秒以下で良好
 - マイクOFF時: astream停止、RTP送信も停止（CPU・帯域節約）
 - マイクON時: astream起動→stale自動リカバリ→即再生
@@ -183,7 +189,6 @@ ssh atomcam 'echo "astream stop" | nc localhost 4000'
 
 #### 課題
 - ATOM起動直後のRTSP接続タイムアウト（運用上許容、起動後安定すれば問題なし）
-- **cmd.cgi HTTP POST遅延**: マイクONボタン押下→astream起動までの遅延（1回目約10〜15秒、2回目約5秒、3回目以降は正常）。astream側ではなくHTTP経路の問題
 
 ### フェーズ4+: 音質・その他の品質改善
 - エコーキャンセル（AEC）パラメータ調整（`IMP_AI_EnableAec()`は動作確認済み）
@@ -390,3 +395,4 @@ libcallback.soだけでなくスクリプトやHTMLも忘れずにコピーす�
 - 2026-03-17: フェーズ4ステップ4完了: 遅延計測＋初期バーストスキップ。astream側遅延ゼロ確認、起動時バースト対策で約2秒→約1秒に改善。残り1秒はWebRTC/go2rtc区間
 - 2026-03-18: go2rtcバッファパッチ(0005)を除去。bufferSize=5 vs 100を比較し、パッチは不要と結論。ビルド手順を精査・整理。1回目セッションのFIFOバッファ蓄積問題を新たに特定（backchannel.shの常時書き込みが原因）
 - 2026-03-18: フェーズ4ステップ8完了: 1回目セッションのFIFOバッファ蓄積問題を解決。stale検出+drainモード方式を採用（feedリトライ検出→speaker_clean+FIFOフラッシュ→read間隔安定まで読み捨て）。astream側feed_retry=0、total_ms=10msに改善。残る体感遅延（1回目15秒、2回目5秒）はcmd.cgi HTTP POST遅延が原因と特定
+- 2026-03-18: cmd.cgi遅延を計測し問題解消を確認。前回の「1回目15秒無音」はsquashfs内のwebrtc.htmlがステップ6/7未反映だったことが原因。SDデプロイで恒久修正。フェーズ4完了（1回目~1秒、2回目以降~0.5秒）
