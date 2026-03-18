@@ -284,26 +284,29 @@ pihole Local DNS: *.home → 192.168.0.2
    - 自己署名証明書の自動生成を確認
 3. **HA configuration.yaml修正** — 完了
    - `trusted_proxies` に `::1` を追加（CaddyがIPv6 localhostからプロキシするため）
-4. **動作確認** — 部分完了
-   - ha.home: 200 OK
-   - ma.home: 200 OK
-   - dvd.home: 200 OK
-   - pihole.home: 403（正常、ログイン必要）
-   - atomcam.home: 未確認（ATOMカメラがOFF中）
-
-#### 残作業
-- ATOMカメラの電源ON後、IPアドレスを確認してCaddyfileを更新
-- `https://atomcam.home/webrtc.html?media=video+audio+microphone` でWebRTC双方向会話の動作確認
-- HAダッシュボードにiframeカード設置:
-  ```yaml
-  type: iframe
-  url: "https://atomcam.home/webrtc.html?media=video+audio+microphone"
-  aspect_ratio: "16:9"
-  ```
-- ブラウザでの自己署名証明書の例外承認（初回のみ）
+4. **動作確認** — 完了
+   - ha.home, ma.home, dvd.home, pihole.home, atomcam.home: 全て動作確認OK
+   - atomcam.home: WebRTC双方向会話がHTTPS経由で動作確認済み
+5. **CaddyルートCA証明書をMacにインストール** — 完了
+   - `docker exec caddy cat /data/caddy/pki/authorities/local/root.crt` で取得
+   - `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain` で登録
+   - ブラウザの「保護されていない通信」警告が解消、HAアプリからの接続も可能に
+6. **静的サイトをCaddyに移行** — 完了
+   - www.home でファイルサーバー配信（`/var/www/html` をルートに `file_server browse`）
+   - conobie.jp, harukomado.com にパスベースでアクセス可能
+7. **HAダッシュボードにATOMカメラ統合** — 完了
+   - HAの標準iframeカードは `allow="microphone"` 属性を付けないため `getUserMedia()` がブロックされる
+   - `panel_iframe` はHA 2026.2.3で廃止済み
+   - **解決策**: カスタムカード `atomcam-card.js` を作成（`/config/www/atomcam-card.js`）
+     - `allow="microphone; camera; autoplay; fullscreen"` 付きiframeを生成
+     - ダッシュボードで `type: custom:atomcam-card` として使用
+   - Caddy側で `Permissions-Policy: microphone=*, camera=*` ヘッダーも追加（atomcam.home）
+   - 映像表示 + マイクボタン + 双方向会話が全てHAダッシュボードから動作確認済み
 
 #### 今後の検討事項
-- nginx除去とCaddyへの統合（`/var/www/html`の静的サイト配信、aisegのクロス制限解除）
+- Tailscale経由での外出先アクセス（Caddyの `default_bind` にTailscale IP追加 + TailscaleのDNS設定）
+- aiseg2のリバースプロキシ（Digest認証+X-Frame-Options問題のため保留）
+- nginx除去（現在停止中、Caddyに移行済み）
 - pihole Docker化
 - HA native統合（AlexxIT/WebRTCカード等。v4l2rtspserverにRTSPバックチャネルがないため技術的に不確実）
 
@@ -503,3 +506,4 @@ libcallback.soだけでなくスクリプトやHTMLも忘れずにコピーす�
 - 2026-03-18: フェーズ4+: WebRTC接続高速化。STUNサーバー除去（LAN内不要）、go2rtcストリームからMJPEGソース除去（無駄なプロデューサー起動・停止を排除）。映像表示時間が若干改善
 - 2026-03-18: フェーズ5前半: リファクタリング（Step 3以外）。audio_stream.c: 計測ログ除去(~80行)、名前付き定数導入、パラメータバリデーション、volatile追加（355→276行）。webrtc.html: エラーハンドリング改善、定数抽出。rtspserver.sh/backchannel.sh: デッドコード除去・FIFOチェック追加
 - 2026-03-18: フェーズ6着手: raspi上にCaddy（リバースプロキシ）+ pihole Local DNSで全サービスHTTPS化。pihole DNSにha/atomcam/ma/dvd/pihole.home登録、Caddyfile作成・Docker起動、HA trusted_proxiesに::1追加。ha/ma/dvd/pihole.homeの動作確認OK。atomcam.homeはATOM電源OFF中のため未確認。webrtc.htmlの変更不要（サブドメイン方式でlocation.protocol/hostnameがそのまま機能）
+- 2026-03-18: フェーズ6完了: CaddyルートCA証明書をMacに登録（保護されていない通信の警告解消）。ATOM電源ON→atomcam.homeでWebRTC双方向会話動作確認。静的サイトをwww.homeに移行（file_server browse）。HAダッシュボード統合はカスタムカード（atomcam-card.js）で実現（標準iframeカードはallow="microphone"未対応、panel_iframeはHA 2026.2で廃止）。HAから映像+双方向会話の動作確認完了

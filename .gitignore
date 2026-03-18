@@ -8,4 +8,5 @@ atomcam_tools.zip
 *.xcodeproj/xcshareddata/
 *.log
 bin/
-
+.vscode
+.DS_Store
