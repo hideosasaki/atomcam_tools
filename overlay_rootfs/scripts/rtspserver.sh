@@ -131,7 +131,6 @@ webrtc:
         - \${RTMP_URL:}
 streams:
     video0:
-        - http://localhost/cgi-bin/get_jpeg.cgi
         - \${HOMEKIT_SOURCE:}#video=copy#audio=copy
         - exec:/scripts/backchannel.sh#backchannel=1
 EOF
