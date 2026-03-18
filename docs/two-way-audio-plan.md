@@ -244,71 +244,178 @@ webrtc.htmlに計測コード（performance.now()ベース）を追加して検�
 **目標**: HAダッシュボードからカメラ映像+双方向会話を使えるようにする。raspi上の他サービスも含めてHTTPS化。
 
 #### 環境
-- HAサーバー: Raspberry Pi (192.168.0.2)、HA Container (Docker, host network)、Tailscale稼働中
-- 同居サービス: pihole (v6, :8080)、Music Assistant (:8095)、dvd-stream-box (:5000)、nginx (:80, 静的サイト配信)
-- ATOMカメラ: 同一LAN、go2rtc v1.9.2、WebRTC双方向対応済み
-- アクセス元: 同一LAN内のPC/スマホ
+- HAサーバー: Raspberry Pi (192.168.0.2, Tailscale IP: 100.103.210.33)、HA Container (Docker, host network)、Tailscale稼働中
+- 同居サービス: pihole (v6, :8080)、Music Assistant (:8095)、dvd-stream-box (:5000)
+- ATOMカメラ: 同一LAN (192.168.0.12)、go2rtc v1.9.2、WebRTC双方向対応済み
+- nginx: 停止済み（Caddyに移行完了）
+- アクセス元: LAN内PC/スマホ、Tailscale経由（外出先）
 
-#### 方式: Caddy + pihole Local DNS
+#### 最終アーキテクチャ: Caddy + Tailscale HTTPS + パスベースルーティング
 ```
-ブラウザ (LAN内)
-  │ HTTPS (*.home)
+ブラウザ / HAアプリ / Fully Kiosk Browser
+  │ HTTPS (Tailscale証明書 = Let's Encrypt)
   ▼
-Caddy (192.168.0.2:443) ── TLS終端、リバースプロキシ
-  ├── ha.home              → localhost:8123      (Home Assistant)
-  ├── atomcam.home         → <atomcam-ip>:80     (ATOM Web UI)
-  ├── ma.home              → localhost:8095      (Music Assistant)
-  ├── dvd.home             → localhost:5000      (dvd-stream-box)
-  └── pihole.home          → localhost:8080      (pihole v6)
+Caddy (192.168.0.2:443 + 100.103.210.33:443) ── TLS終端、リバースプロキシ
+  ├── /                    → localhost:8123      (Home Assistant、ルート)
+  ├── /go2rtc/*            → 192.168.0.12:1984   (ATOM go2rtc API/WebSocket)
+  ├── /cgi-bin/*           → 192.168.0.12:80     (ATOM cmd.cgi)
+  ├── /atomcam/*           → 192.168.0.12:80     (ATOM Web UI)
+  ├── /ma/*                → localhost:8095      (Music Assistant)
+  ├── /dvd/*               → localhost:5000      (dvd-stream-box)
+  ├── /pihole/*            → localhost:8080      (pihole v6)
+  └── /www/*               → /var/www/html       (静的サイト)
 
-Caddy (192.168.0.2:1984) ── TLS終端（go2rtc WebSocket用）
-  └── atomcam.home:1984    → <atomcam-ip>:1984   (go2rtc API/WS)
-
-pihole Local DNS: *.home → 192.168.0.2
+ドメイン: home.barn-alpha.ts.net
+TLS証明書: tailscale cert（Let's Encrypt自動発行）
+pihole Local DNS: home.barn-alpha.ts.net → 192.168.0.2（LAN内はLAN IP直接）
 ```
 
-#### 選定理由
-- **webrtc.htmlの変更不要**: サブドメイン方式のため `location.protocol`/`location.hostname`がそのまま機能。`ws://`→`wss://`もlocation.protocolベースで自動判定済み（webrtc.html 127-128行目）
-- **一元管理**: Caddyfile 1ファイルで全サービスのHTTPS設定を管理
-- **Tailscale Serveは使わない**: パスベースのみ対応で管理が複雑になるため
-- TLS証明書: Caddyの自動自己署名証明書（`tls internal`）。LAN内プライベートドメインのためLE不可
-- Caddyは `default_bind 192.168.0.2` でLAN IPにバインド（Tailscaleの`:443`と共存）
+#### *.homeサブドメイン方式からの移行経緯
+当初はCaddy自己署名証明書 + pihole Local DNS（*.home）でサブドメイン方式を採用したが、以下の理由で断念しTailscale HTTPSに移行:
+- **Android HAアプリが自己署名CAを信頼しない**: Android 7.0+ではアプリがuser-installed CAを信頼しない（`network_security_config`が必要だがHA Companion Appは未対応、GitHub Issue #5735）
+- **Mac HAアプリ（WKWebView）が制約多い**: クロスオリジンiframeで自己署名証明書を拒否。さらにRTCPeerConnection自体が存在しない
+- **サブドメインとパスベースの混在は運用が複雑**: 一部サービスが*.homeで他がhome.barn-alpha.ts.netになると混乱する
+- **Tailscale HTTPSなら全て解決**: 正規Let's Encrypt証明書、全プラットフォームで信頼される、外出先アクセスも可能
+
+#### raspi上の設定ファイル
+| ファイル | 役割 |
+|---------|------|
+| `~/homeassistant/docker-compose.yml` | HA, Music Assistant, Caddyのコンテナ定義 |
+| `~/homeassistant/Caddyfile` | リバースプロキシ設定（handle_path方式） |
+| `~/homeassistant/home.barn-alpha.ts.net.crt` | Tailscale HTTPS証明書 |
+| `~/homeassistant/home.barn-alpha.ts.net.key` | Tailscale HTTPS秘密鍵 |
+| `~/homeassistant/config/configuration.yaml` | HA設定（trusted_proxies: 127.0.0.1, ::1, 100.64.0.0/10） |
+| `~/homeassistant/config/www/atomcam-card.js` | HAカスタムカード（デプロイ先） |
+| `~/homeassistant/config/www/fullscreen.html` | Fully Kiosk Browser用ページ（デプロイ先） |
+
+#### Tailscale HTTPS証明書の取得・配置
+```bash
+# raspi上で証明書を取得
+sudo tailscale cert home.barn-alpha.ts.net
+# 生成される: home.barn-alpha.ts.net.crt, home.barn-alpha.ts.net.key
+
+# HAディレクトリにコピー（docker-compose.ymlでCaddyコンテナにマウント）
+cp home.barn-alpha.ts.net.crt ~/homeassistant/
+cp home.barn-alpha.ts.net.key ~/homeassistant/
+chmod 644 ~/homeassistant/home.barn-alpha.ts.net.key  # Caddyコンテナからの読み取り用
+```
+
+docker-compose.yml の Caddy volumes:
+```yaml
+volumes:
+  - ./Caddyfile:/etc/caddy/Caddyfile
+  - caddy_data:/data
+  - caddy_config:/config
+  - /var/www/html:/var/www/html:ro
+  - ./home.barn-alpha.ts.net.crt:/etc/caddy/cert.crt:ro
+  - ./home.barn-alpha.ts.net.key:/etc/caddy/cert.key:ro
+```
+
+#### Caddyfile（現行）
+```caddyfile
+{
+    https_port 443
+    http_port 8443
+    default_bind 192.168.0.2 100.103.210.33
+}
+
+home.barn-alpha.ts.net {
+    tls /etc/caddy/cert.crt /etc/caddy/cert.key
+
+    # Trailing slash redirects
+    @atomcam-redir path /atomcam
+    redir @atomcam-redir /atomcam/ 301
+    @dvd-redir path /dvd
+    redir @dvd-redir /dvd/ 301
+    @ma-redir path /ma
+    redir @ma-redir /ma/ 301
+    @pihole-redir path /pihole
+    redir @pihole-redir /pihole/ 301
+    @www-redir path /www
+    redir @www-redir /www/ 301
+
+    handle_path /go2rtc/* {
+        reverse_proxy http://192.168.0.12:1984
+    }
+    handle /cgi-bin/* {
+        reverse_proxy http://192.168.0.12:80
+    }
+    handle_path /atomcam/* {
+        reverse_proxy http://192.168.0.12:80
+    }
+    handle_path /ma/* {
+        reverse_proxy localhost:8095
+    }
+    handle_path /dvd/* {
+        reverse_proxy localhost:5000
+    }
+    handle_path /pihole/* {
+        reverse_proxy localhost:8080
+    }
+    handle_path /www/* {
+        root * /var/www/html
+        file_server browse
+    }
+    handle {
+        reverse_proxy localhost:8123
+    }
+}
+```
+注: `handle_path`は自動でprefixをstripする。`handle`+`uri strip_prefix`の組み合わせは不要。
+注: `/cgi-bin/*`はstrip不要なのでそのまま`handle`を使用。
 
 #### 完了したステップ
 1. **pihole Local DNSにレコード追加** — 完了
-   - ha.home, atomcam.home, ma.home, dvd.home, pihole.home → 192.168.0.2
-   - pihole v6 API (`PUT /api/config/dns/hosts/<ip>%20<domain>`) で登録
+   - `home.barn-alpha.ts.net → 192.168.0.2`（LAN内クライアントがLAN IPで直接アクセスするため）
+   - 旧*.homeレコード（ha.home, atomcam.home等）は廃止
 2. **CaddyをDockerで起動** — 完了
    - `~/homeassistant/docker-compose.yml` にcaddyサービス追加（`caddy:2`, host network）
-   - `~/homeassistant/Caddyfile` 作成（6サービス分のリバースプロキシ）
-   - 自己署名証明書の自動生成を確認
-3. **HA configuration.yaml修正** — 完了
-   - `trusted_proxies` に `::1` を追加（CaddyがIPv6 localhostからプロキシするため）
-4. **動作確認** — 完了
-   - ha.home, ma.home, dvd.home, pihole.home, atomcam.home: 全て動作確認OK
-   - atomcam.home: WebRTC双方向会話がHTTPS経由で動作確認済み
-5. **CaddyルートCA証明書をMacにインストール** — 完了
-   - `docker exec caddy cat /data/caddy/pki/authorities/local/root.crt` で取得
-   - `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain` で登録
-   - ブラウザの「保護されていない通信」警告が解消、HAアプリからの接続も可能に
-6. **静的サイトをCaddyに移行** — 完了
-   - www.home でファイルサーバー配信（`/var/www/html` をルートに `file_server browse`）
-   - conobie.jp, harukomado.com にパスベースでアクセス可能
-7. **HAダッシュボードにATOMカメラ統合** — 完了
-   - HAの標準iframeカードは `allow="microphone"` 属性を付けないため `getUserMedia()` がブロックされる
-   - `panel_iframe` はHA 2026.2.3で廃止済み
-   - **解決策**: カスタムカード `atomcam-card.js` を作成（`/config/www/atomcam-card.js`）
-     - `allow="microphone; camera; autoplay; fullscreen"` 付きiframeを生成
-     - ダッシュボードで `type: custom:atomcam-card` として使用
-   - Caddy側で `Permissions-Policy: microphone=*, camera=*` ヘッダーも追加（atomcam.home）
-   - 映像表示 + マイクボタン + 双方向会話が全てHAダッシュボードから動作確認済み
+   - Tailscale証明書をコンテナにマウント
+3. **Tailscale Serve競合の解消** — 完了
+   - tailscaledがTailscale IP:443をlistenしていたためCaddyがbindできず
+   - `sudo tailscale serve reset`で解決
+   - Caddyの`default_bind`にLAN IP(192.168.0.2) + Tailscale IP(100.103.210.33)を指定
+4. **HA configuration.yaml修正** — 完了
+   - `trusted_proxies` に `127.0.0.1`, `::1`, `100.64.0.0/10`（Tailscale CGNAT範囲）
+5. **HAカスタムカード（atomcam-card.js）** — 完了
+   - 直接WebRTC接続（iframeなし）。カード内でRTCPeerConnection + go2rtc WebSocket
+   - 同一オリジン（Caddy経由）なのでCORS/Permissions Policy問題なし
+   - lazy getUserMedia（マイクボタン初回押下時にリクエスト）
+   - sendonly transceiver事前作成（SDP negotiationにバックチャネルを含める）
+   - `base_url`設定でWebSocket/fetch先オリジンを明示指定可能（HAアプリのWebViewではlocation.hostが内部アドレスを返すため）
+   - HA Lovelace設定例:
+     ```yaml
+     type: custom:atomcam-card
+     src: video0
+     base_url: https://home.barn-alpha.ts.net
+     ```
+6. **fullscreen.html（Fully Kiosk Browser用）** — 完了
+   - フルスクリーンWebRTCページ。マイクON=音量100%+スピーカーON、OFF=ミュート
+   - 大きなマイクボタン(112px)、音量ボタンなし（シンプルUI）
+   - URL: `https://home.barn-alpha.ts.net/local/fullscreen.html`
+7. **Caddyfile handle→handle_path移行** — 完了
+   - 末尾スラッシュなしURL（/atomcam, /dvd等）の404問題を修正
+
+#### プラットフォーム別動作状況
+| プラットフォーム | 映像 | 音声(受信) | マイク(送信) | 備考 |
+|----------------|------|-----------|------------|------|
+| Chrome (Mac/Android) | ✓ | ✓ | ✓ | HAダッシュボード経由で全機能OK |
+| Safari (Mac) | ✓ | ✓ | ✓ | 初回カメラ/マイク許可ダイアログあり |
+| Fully Kiosk Browser (Android) | ✓ | ✓ | ✓ | PLUS版 + Enable Microphone Access設定が必要 |
+| Android HAアプリ (WebView) | ✓ | ✓ | ✗ | getUserMediaがpending（WebView内でマイク許可ダイアログが出ない） |
+| Mac HAアプリ (WKWebView) | ✗ | ✗ | ✗ | RTCPeerConnectionが存在しない |
+
+#### Fully Kiosk Browser設定要件
+- **PLUS版ライセンス**が必要（無料版ではマイクアクセス不可）
+- Settings → Advanced Web Settings → **Enable Microphone Access**: ON
+- Settings → Advanced Web Settings → **Enable Webcam Access**: ON（任意）
+- Androidの権限設定で「マイク」を許可
+- URL: `https://home.barn-alpha.ts.net/local/fullscreen.html`
 
 #### 今後の検討事項
-- Tailscale経由での外出先アクセス（Caddyの `default_bind` にTailscale IP追加 + TailscaleのDNS設定）
 - aiseg2のリバースプロキシ（Digest認証+X-Frame-Options問題のため保留）
-- nginx除去（現在停止中、Caddyに移行済み）
+- nginx除去（停止中だが未削除）
 - pihole Docker化
-- HA native統合（AlexxIT/WebRTCカード等。v4l2rtspserverにRTSPバックチャネルがないため技術的に不確実）
 
 ## 技術メモ
 
@@ -322,11 +429,13 @@ pihole Local DNS: *.home → 192.168.0.2
 | `libcallback/audio_control.c` | 音声処理制御（AEC, AGC, NS等） |
 | `overlay_rootfs/scripts/backchannel.sh` | go2rtcバックチャネル→FIFO |
 | `overlay_rootfs/scripts/rtspserver.sh` | go2rtc設定生成・FIFO準備・起動 |
-| `web/source/webrtc.html` | WebRTCクライアント（双方向対応 + マイクボタンUI） |
+| `web/source/webrtc.html` | WebRTCクライアント（ATOM直接アクセス用、双方向対応 + マイクボタンUI） |
 | `web/source/vue/Setting.vue` | 管理画面（双方向会話スイッチ + WebRTCUrl生成） |
 | `web/source/vue/i18n-ja.yaml` | 日本語ローカライズ |
 | `web/source/vue/i18n-en.yaml` | 英語ローカライズ |
 | `custompackages/package/go2rtc/go2rtc.mk` | go2rtc v1.9.2ビルド設定 |
+| `homeassistant/atomcam-card.js` | HAカスタムカード（WebRTC直接接続、Caddy経由同一オリジン） |
+| `homeassistant/fullscreen.html` | Fully Kiosk Browser用フルスクリーンページ |
 
 ### スピーカー出力API
 ```c
@@ -349,7 +458,8 @@ extern int local_sdk_speaker_set_pa_mode(int mode);        // PA制御
 - WebRTCクライアントは`media=video+audio+microphone`パラメータでマイク有効化
 - HOMEKIT_SOURCEは`rtsp://localhost:8554/video0_unicast`
 - lighttpdはポート80、go2rtc APIはポート1984
-- `getUserMedia()`はSecure Context必須 → `localhost`（SSHポートフォワード）、`atomcam.local`(mDNS)、またはChromeフラグで対応
+- `getUserMedia()`はSecure Context必須（HTTPSまたはlocalhost）。Tailscale HTTPS（Let's Encrypt証明書）で対応。自己署名証明書はAndroidアプリで使えないため不採用
+- HAアプリ（WKWebView/WebView）ではgetUserMediaが制限される。Fully Kiosk Browser（PLUS版）で代替
 
 ## リスク・課題
 | 課題 | 深刻度 | 状態 |
