@@ -15,13 +15,26 @@ extern int local_sdk_speaker_set_ap_mode(int mode);
 extern int local_sdk_speaker_set_pa_mode(int mode);
 extern void CommandResponse(int fd, const char *res);
 
+// Buffer and timing constants
+#define BUF_LENGTH          640       // PCM buffer: 320 samples * 2 bytes = 40ms @ 8kHz
+#define ALAW_BUF_LEN        320       // a-law buffer: half of PCM buffer
+#define DRAIN_THRESHOLD_MS  15.0      // read interval threshold for real-time detection
+#define FEED_RETRY_US       (10*1000) // 10ms retry interval for speaker feed
+#define FIFO_REOPEN_US      (1000*1000) // 1s wait before FIFO reopen on error
+#define SOURCE_CLOSE_WAIT_US (5000*1000) // 5s wait after source closes
+#define SPEAKER_MODE_ACTIVE 3
+#define SPEAKER_MODE_OFF    0
+#define DEFAULT_VOLUME      40
+#define MAX_VOLUME          100
+#define MAX_PATH_LEN        256
+
 static int (*set_pa_mode)(int mode);
 static pthread_t streamThread;
-static int streamRunning = 0;
+static volatile int streamRunning = 0;
 static int streamFd = -1;
-static char streamPath[256];
-static int streamVolume = 40;
-static int streamAlaw = 0;  // 1 = decode a-law (PCMA) to s16le
+static char streamPath[MAX_PATH_LEN];
+static volatile int streamVolume = DEFAULT_VOLUME;
+static volatile int streamAlaw = 0;  // 1 = decode a-law (PCMA) to s16le
 
 // A-law to 16-bit linear PCM decode
 static short alaw_decode(unsigned char alaw) {
@@ -38,7 +51,7 @@ static short alaw_decode(unsigned char alaw) {
   return sign ? -magnitude : magnitude;
 }
 
-// Latency measurement helpers
+// Millisecond timer for stale data detection
 static double getTimeMs(void) {
   struct timeval tv;
   gettimeofday(&tv, NULL);
@@ -47,14 +60,7 @@ static double getTimeMs(void) {
 
 static void *AudioStreamThread(void *arg) {
 
-  static const int bufLength = 640;
-  unsigned char buf[bufLength];
-
-  // Latency measurement state
-  int logCount = 0;
-  double readTotal = 0, feedTotal = 0, feedRetryTotal = 0;
-  int feedRetryCount = 0;
-  const int LOG_INTERVAL = 100; // log every 100 reads
+  unsigned char buf[BUF_LENGTH];
 
   printf("[astream] start: %s vol=%d alaw=%d\n", streamPath, streamVolume, streamAlaw);
 
@@ -64,7 +70,7 @@ static void *AudioStreamThread(void *arg) {
     int fd = open(streamPath, O_RDONLY);
     if(fd < 0) {
       fprintf(stderr, "[astream] open %s failed: %s\n", streamPath, strerror(errno));
-      usleep(1000 * 1000);
+      usleep(FIFO_REOPEN_US);
       continue;
     }
 
@@ -72,20 +78,17 @@ static void *AudioStreamThread(void *arg) {
     {
       int flags = fcntl(fd, F_GETFL, 0);
       fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-      while(read(fd, buf, bufLength) > 0) {}
+      while(read(fd, buf, BUF_LENGTH) > 0) {}
       fcntl(fd, F_SETFL, flags);
     }
 
-    double openTime = getTimeMs();
-
     local_sdk_speaker_clean_buf_data();
     local_sdk_speaker_set_volume(streamVolume);
-    set_pa_mode(3);
+    set_pa_mode(SPEAKER_MODE_ACTIVE);
 
     // Stale data recovery: when feed_pcm_data needs retries, the speaker
     // buffer is congested with stale data. Flush speaker + FIFO, then
     // discard reads until read interval stabilizes (>15ms = real-time).
-    double startTime = getTimeMs();
     int firstRead = 1;
     int skippedBytes = 0;
     int skippedReads = 0;
@@ -93,44 +96,26 @@ static void *AudioStreamThread(void *arg) {
     int draining = 0;       // 1 = discarding stale data after flush
     double lastReadTime = 0;
 
-    logCount = 0;
-    readTotal = feedTotal = feedRetryTotal = 0;
-    feedRetryCount = 0;
-
     while(streamRunning) {
-      double t0 = getTimeMs();
-
       if(streamAlaw) {
         // a-law: read half the buffer (1 byte alaw -> 2 bytes PCM)
-        unsigned char alawBuf[bufLength / 2];
-        ssize_t size = read(fd, alawBuf, bufLength / 2);
+        unsigned char alawBuf[ALAW_BUF_LEN];
+        ssize_t size = read(fd, alawBuf, ALAW_BUF_LEN);
         double t1 = getTimeMs();
         if(size <= 0) {
           if(size < 0 && errno == EINTR) continue;
           break;
         }
-        if(firstRead) {
-          firstRead = 0;
-          FILE *mfp = fopen("/tmp/astream_measure.log", "a");
-          if(mfp) {
-            fprintf(mfp, "[measure] open=%.0f first_read=%.0f wait_ms=%.0f\n",
-                    openTime, t1, t1 - openTime);
-            fclose(mfp);
-          }
-        }
+        if(firstRead) firstRead = 0;
         // While draining, discard data until read interval > 15ms (real-time)
         if(draining) {
           skippedBytes += size;
           skippedReads++;
-          if(lastReadTime > 0 && (t1 - lastReadTime) > 15.0) {
+          if(lastReadTime > 0 && (t1 - lastReadTime) > DRAIN_THRESHOLD_MS) {
             draining = 0;
             local_sdk_speaker_clean_buf_data();
-            FILE *mfp = fopen("/tmp/astream_measure.log", "a");
-            if(mfp) {
-              fprintf(mfp, "[measure] drain_done: skipped_bytes=%d skipped_reads=%d\n",
-                      skippedBytes, skippedReads);
-              fclose(mfp);
-            }
+            printf("[astream] drain done: skipped_bytes=%d skipped_reads=%d\n",
+                   skippedBytes, skippedReads);
             skippedBytes = 0;
             skippedReads = 0;
           }
@@ -144,10 +129,9 @@ static void *AudioStreamThread(void *arg) {
         int pcmSize = size * 2;
         int retries = 0;
         while(streamRunning && local_sdk_speaker_feed_pcm_data(buf, pcmSize)) {
-          usleep(10 * 1000);
+          usleep(FEED_RETRY_US);
           retries++;
         }
-        double t2 = getTimeMs();
 
         // If feed needed retries, speaker buffer is congested.
         // Flush everything and enter drain mode.
@@ -156,64 +140,32 @@ static void *AudioStreamThread(void *arg) {
           int flags = fcntl(fd, F_GETFL, 0);
           fcntl(fd, F_SETFL, flags | O_NONBLOCK);
           int flushed = 0;
-          unsigned char tmpBuf[bufLength];
-          while(read(fd, tmpBuf, bufLength) > 0) flushed++;
+          unsigned char tmpBuf[BUF_LENGTH];
+          while(read(fd, tmpBuf, BUF_LENGTH) > 0) flushed++;
           fcntl(fd, F_SETFL, flags);
           draining = 1;
           lastReadTime = 0;
-          FILE *mfp = fopen("/tmp/astream_measure.log", "a");
-          if(mfp) {
-            fprintf(mfp, "[measure] stale_detected: retries=%d flushed_reads=%d at=%.0f\n",
-                    retries, flushed, t2);
-            fclose(mfp);
-          }
+          printf("[astream] stale detected: retries=%d flushed=%d\n", retries, flushed);
           continue;
         }
 
-        if(firstFeed) {
-          firstFeed = 0;
-          FILE *mfp = fopen("/tmp/astream_measure.log", "a");
-          if(mfp) {
-            fprintf(mfp, "[measure] first_feed=%.0f feed_ms=%.0f total_ms=%.0f retries=%d\n",
-                    t2, t2 - t1, t2 - startTime, retries);
-            fclose(mfp);
-          }
-        }
-
-        readTotal += (t1 - t0);
-        feedTotal += (t2 - t1);
-        if(retries > 0) {
-          feedRetryCount++;
-          feedRetryTotal += retries * 10.0;
-        }
+        if(firstFeed) firstFeed = 0;
       } else {
-        ssize_t size = read(fd, buf, bufLength);
+        ssize_t size = read(fd, buf, BUF_LENGTH);
         double t1 = getTimeMs();
         if(size <= 0) {
           if(size < 0 && errno == EINTR) continue;
           break;
         }
-        if(firstRead) {
-          firstRead = 0;
-          FILE *mfp = fopen("/tmp/astream_measure.log", "a");
-          if(mfp) {
-            fprintf(mfp, "[measure] open=%.0f first_read=%.0f wait_ms=%.0f\n",
-                    openTime, t1, t1 - openTime);
-            fclose(mfp);
-          }
-        }
+        if(firstRead) firstRead = 0;
         if(draining) {
           skippedBytes += size;
           skippedReads++;
-          if(lastReadTime > 0 && (t1 - lastReadTime) > 15.0) {
+          if(lastReadTime > 0 && (t1 - lastReadTime) > DRAIN_THRESHOLD_MS) {
             draining = 0;
             local_sdk_speaker_clean_buf_data();
-            FILE *mfp = fopen("/tmp/astream_measure.log", "a");
-            if(mfp) {
-              fprintf(mfp, "[measure] drain_done: skipped_bytes=%d skipped_reads=%d\n",
-                      skippedBytes, skippedReads);
-              fclose(mfp);
-            }
+            printf("[astream] drain done: skipped_bytes=%d skipped_reads=%d\n",
+                   skippedBytes, skippedReads);
             skippedBytes = 0;
             skippedReads = 0;
           }
@@ -222,73 +174,38 @@ static void *AudioStreamThread(void *arg) {
         }
         int retries = 0;
         while(streamRunning && local_sdk_speaker_feed_pcm_data(buf, size)) {
-          usleep(10 * 1000);
+          usleep(FEED_RETRY_US);
           retries++;
         }
-        double t2 = getTimeMs();
 
         if(retries > 0 && !firstFeed) {
           local_sdk_speaker_clean_buf_data();
           int flags = fcntl(fd, F_GETFL, 0);
           fcntl(fd, F_SETFL, flags | O_NONBLOCK);
           int flushed = 0;
-          unsigned char tmpBuf[bufLength];
-          while(read(fd, tmpBuf, bufLength) > 0) flushed++;
+          unsigned char tmpBuf[BUF_LENGTH];
+          while(read(fd, tmpBuf, BUF_LENGTH) > 0) flushed++;
           fcntl(fd, F_SETFL, flags);
           draining = 1;
           lastReadTime = 0;
-          FILE *mfp = fopen("/tmp/astream_measure.log", "a");
-          if(mfp) {
-            fprintf(mfp, "[measure] stale_detected: retries=%d flushed_reads=%d at=%.0f\n",
-                    retries, flushed, t2);
-            fclose(mfp);
-          }
+          printf("[astream] stale detected: retries=%d flushed=%d\n", retries, flushed);
           continue;
         }
 
-        if(firstFeed) {
-          firstFeed = 0;
-          FILE *mfp = fopen("/tmp/astream_measure.log", "a");
-          if(mfp) {
-            fprintf(mfp, "[measure] first_feed=%.0f feed_ms=%.0f total_ms=%.0f retries=%d\n",
-                    t2, t2 - t1, t2 - startTime, retries);
-            fclose(mfp);
-          }
-        }
-
-        readTotal += (t1 - t0);
-        feedTotal += (t2 - t1);
-        if(retries > 0) {
-          feedRetryCount++;
-          feedRetryTotal += retries * 10.0;
-        }
-      }
-
-      logCount++;
-      if(logCount >= LOG_INTERVAL) {
-        FILE *logfp = fopen("/tmp/astream_latency.log", "a");
-        if(logfp) {
-          fprintf(logfp, "[astream] latency: read_avg=%.1fms feed_avg=%.1fms feed_retry=%d/%d (%.0fms total)\n",
-                  readTotal / logCount, feedTotal / logCount,
-                  feedRetryCount, logCount, feedRetryTotal);
-          fclose(logfp);
-        }
-        logCount = 0;
-        readTotal = feedTotal = feedRetryTotal = 0;
-        feedRetryCount = 0;
+        if(firstFeed) firstFeed = 0;
       }
     }
 
     close(fd);
-    set_pa_mode(0);
+    set_pa_mode(SPEAKER_MODE_OFF);
 
     if(streamRunning) {
       printf("[astream] source closed, waiting for writer...\n");
-      usleep(5000 * 1000);  // 5秒待機してCPU負荷を抑制
+      usleep(SOURCE_CLOSE_WAIT_US);
     }
   }
 
-  set_pa_mode(0);
+  set_pa_mode(SPEAKER_MODE_OFF);
   printf("[astream] stopped\n");
 
   if(streamFd >= 0) {
@@ -326,13 +243,17 @@ char *AudioStream(int fd, char *tokenPtr) {
     return "error";
   }
 
-  strncpy(streamPath, p, 255);
-  streamPath[255] = '\0';
+  strncpy(streamPath, p, MAX_PATH_LEN - 1);
+  streamPath[MAX_PATH_LEN - 1] = '\0';
 
   p = strtok_r(NULL, " \t\r\n", &tokenPtr);
-  streamVolume = 40;
+  streamVolume = DEFAULT_VOLUME;
   streamAlaw = 0;
-  if(p) streamVolume = atoi(p);
+  if(p) {
+    streamVolume = atoi(p);
+    if(streamVolume < 0) streamVolume = 0;
+    if(streamVolume > MAX_VOLUME) streamVolume = MAX_VOLUME;
+  }
 
   p = strtok_r(NULL, " \t\r\n", &tokenPtr);
   if(p && !strcmp(p, "alaw")) streamAlaw = 1;

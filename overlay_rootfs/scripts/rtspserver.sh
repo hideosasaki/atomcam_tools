@@ -183,6 +183,5 @@ EOF
 fi
 
 echo -n "go2rtc: "
-#/usr/bin/go2rtc $option -daemon
 /usr/bin/go2rtc $option >> /tmp/log/go2rtc.log &
 exit 0

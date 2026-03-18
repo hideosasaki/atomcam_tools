@@ -201,8 +201,41 @@ webrtc.htmlに計測コード（performance.now()ベース）を追加して検�
 - 映像表示時間: 体感で若干の改善（初回7-10秒→約5秒）。残りの遅延はRTSP接続確立+WebRTCネゴシエーション自体の所要時間
 - CPU負荷: MJPEG除去の副次効果でWebRTC接続中のloadが~7→~4.8に改善
 
-## フェーズ5: リファクタリング
-- コードのふりかえり
+## フェーズ5: リファクタリング — 進行中 (2026-03-18)
+**目標**: フェーズ1〜4+で蓄積した技術的負債を解消し、保守性・信頼性を改善する
+
+**方針**: Step 3（alaw/PCMパス統合）以外を先に実施→動作確認→Step 3を実施
+
+#### 完了したステップ
+1. **audio_stream.c — 計測ログ除去** (~80行削減)
+   - `/tmp/astream_measure.log`, `/tmp/astream_latency.log` への書き込みをすべて削除
+   - 重要イベント（stale検出、drain完了）は `printf` でシステムログに残した
+   - 不要になった変数・タイマー変数も削除（`openTime`, `startTime`, `t0`, `t2`, `logCount`等）
+
+2. **audio_stream.c — 名前付き定数導入**
+   - 12個のマジックナンバーを `#define` 定数に置換
+   - `BUF_LENGTH`, `ALAW_BUF_LEN`, `DRAIN_THRESHOLD_MS`, `FEED_RETRY_US`, `FIFO_REOPEN_US`, `SOURCE_CLOSE_WAIT_US`, `SPEAKER_MODE_ACTIVE/OFF`, `DEFAULT_VOLUME`, `MAX_VOLUME`, `MAX_PATH_LEN`
+
+3. **audio_stream.c — パラメータバリデーション追加**
+   - volume を `[0, MAX_VOLUME]` にクランプ
+
+4. **audio_stream.c — volatile修飾子追加**
+   - `streamRunning`, `streamVolume`, `streamAlaw` に `volatile` を追加（スレッド間共有変数の安全性）
+
+5. **webrtc.html — エラーハンドリング改善**
+   - `fetch().catch(function(){})` → `console.warn` でエラーログ出力
+   - WebSocket `error`/`close` ハンドラ追加（切断時に `astream stop` 送信）
+   - ハードコード値を変数に抽出 (`GO2RTC_PORT`, `AUDIO_FIFO`, `DEFAULT_VOL`)
+
+6. **rtspserver.sh / backchannel.sh — デッドコード除去**
+   - rtspserver.sh: コメントアウト行 `#/usr/bin/go2rtc $option -daemon` を削除
+   - backchannel.sh: FIFO存在チェック `[ ! -p "$FIFO" ] && exit 1` を追加
+
+#### 未実施のステップ
+- **audio_stream.c — alaw/PCMパス統合** (~80行削減見込み): read+decode部分のみ分岐し、stale検出・drain・feed等の共通ロジックを1箇所に統合
+
+#### 成果
+- audio_stream.c: 355行 → 276行（79行削減、コード重複はStep 3で解消予定）
 
 ### フェーズ6: 運用構築
 - HTTPS問題の解決(tailscaleを活用?)
@@ -402,3 +435,4 @@ libcallback.soだけでなくスクリプトやHTMLも忘れずにコピーす�
 - 2026-03-18: フェーズ4ステップ8完了: 1回目セッションのFIFOバッファ蓄積問題を解決。stale検出+drainモード方式を採用（feedリトライ検出→speaker_clean+FIFOフラッシュ→read間隔安定まで読み捨て）。astream側feed_retry=0、total_ms=10msに改善。残る体感遅延（1回目15秒、2回目5秒）はcmd.cgi HTTP POST遅延が原因と特定
 - 2026-03-18: cmd.cgi遅延を計測し問題解消を確認。前回の「1回目15秒無音」はsquashfs内のwebrtc.htmlがステップ6/7未反映だったことが原因。SDデプロイで恒久修正。フェーズ4完了（1回目~1秒、2回目以降~0.5秒）
 - 2026-03-18: フェーズ4+: WebRTC接続高速化。STUNサーバー除去（LAN内不要）、go2rtcストリームからMJPEGソース除去（無駄なプロデューサー起動・停止を排除）。映像表示時間が若干改善
+- 2026-03-18: フェーズ5前半: リファクタリング（Step 3以外）。audio_stream.c: 計測ログ除去(~80行)、名前付き定数導入、パラメータバリデーション、volatile追加（355→276行）。webrtc.html: エラーハンドリング改善、定数抽出。rtspserver.sh/backchannel.sh: デッドコード除去・FIFOチェック追加

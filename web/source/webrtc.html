@@ -47,6 +47,10 @@
       <button id="mic-btn" class="off" title="Microphone OFF"></button>
     </div>
     <script>
+      const GO2RTC_PORT = 1984;
+      const AUDIO_FIFO = '/tmp/audio_in.fifo';
+      const DEFAULT_VOL = 40;
+
       let micTrack = null;
       let micSender = null;
       let micEnabled = false;
@@ -67,14 +71,14 @@
         fetch(url, {
           method: 'POST',
           body: JSON.stringify({exec: cmd})
-        }).catch(function() {});
+        }).catch(function(e) { console.warn('[astream]', cmd, e); });
       }
 
       micBtn.addEventListener('click', function() {
         if (!micTrack || !micSender) return;
         micEnabled = !micEnabled;
         if (micEnabled) {
-          sendAstreamCmd('astream /tmp/audio_in.fifo 40 alaw');
+          sendAstreamCmd('astream ' + AUDIO_FIFO + ' ' + DEFAULT_VOL + ' alaw');
           micTrack.enabled = true;
           micSender.replaceTrack(micTrack);
         } else {
@@ -120,8 +124,21 @@
       async function connect(media) {
         const pc = await PeerConnection(media);
         const src = new URLSearchParams(location.search).get('src') || 'video0';
-        const url = new URL(`api/ws?src=${src}`, `${location.protocol}//${location.hostname}:1984`);
+        const url = new URL(`api/ws?src=${src}`, `${location.protocol}//${location.hostname}:${GO2RTC_PORT}`);
         const ws = new WebSocket(url.toString().replace(/^http/, 'ws'));
+
+        ws.addEventListener('error', function(e) {
+          console.error('[webrtc] WebSocket error:', e);
+        });
+
+        ws.addEventListener('close', function() {
+          console.warn('[webrtc] WebSocket closed');
+          if (micEnabled) {
+            micEnabled = false;
+            updateMicButton();
+            sendAstreamCmd('astream stop');
+          }
+        });
 
         ws.addEventListener('open', () => {
           pc.addEventListener('icecandidate', ev => {
