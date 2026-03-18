@@ -16,8 +16,8 @@ AtomCamの公式アプリでサポートされている双方向会話機能を�
 - Web UI統合（Setting.vueにマイク制御UI追加）
 
 ### 未実装
-- 遅延の最適化（現状約2秒）
 - 音質改善
+- go2rtcバッファパッチの効果検証（現在upstreamバッファサイズに戻して検証中）
 
 ## アーキテクチャ（実装済み）
 ```
@@ -110,7 +110,7 @@ ssh atomcam 'echo "astream stop" | nc localhost 4000'
 
 **重要**: 必ず1ステップずつ実施→ビルド→デプロイ→検証の順で進めること。複数ステップを同時に変更しない（問題発生時に原因の切り分けができなくなるため）。
 
-**ビルド手順**: プロジェクトルートの `build.md` を参照。libcallback.soはuClibc環境（`/atomtools/build/cross/mips-uclibc/bin/mipsel-ingenic-linux-uclibc-`）でビルドすること。glibc版gcc（`mipsel-ingenic-linux-gnu-`）を使うとヘッダー不一致でエラーになる。
+**ビルド手順**: 本ドキュメントの「ビルド方法一覧」セクションを参照。
 #### 完了したステップ
 1. `backchannel.sh`: `cat`→`dd bs=320`でバッファリング除去 — 完了 (2026-03-17)
 2. マイクボタンによるastream制御 — 完了 (2026-03-17)
@@ -127,11 +127,12 @@ ssh atomcam 'echo "astream stop" | nc localhost 4000'
    - ボトルネック: 起動時にgo2rtcからデータが一気に到着しスピーカーバッファが詰まる（初回feed_retry=35/100, 650ms）
    - 対策: 時間ベースのバーストスキップ — read間隔が15ms以上に安定するまでデータを読み捨て
    - 結果: Mac→ATOM遅延が約2秒→約1秒に改善
-5. go2rtcバッファ削減パッチ適用 — 完了 (2026-03-17)
-   - `custompackages/package/go2rtc/0005-go2rtc-reduce-audio-buffer.patch`: 音声送信バッファ128→5パケットに削減
-   - パッチは実際のgo2rtc v1.9.2ソース（`pkg/core/track.go`の`bufSize`変数）に合わせて修正
+5. go2rtcバッファ削減パッチ適用 → 除去（効果なし） (2026-03-17〜18)
+   - `0005-go2rtc-reduce-audio-buffer.patch`: 音声送信バッファ100→5パケットに削減するパッチを作成
    - `build_squashfs.sh`: go2rtcバイナリのコピーステップを追加
-   - 効果の定量比較は未実施（後続の改善が支配的だったため）
+   - **検証結果**: bufferSize=5とbufferSize=100（upstream）を比較。体感・ログとも有意な差なし
+   - 1回目セッションの遅延はgo2rtcバッファではなく、backchannel.shがFIFOに常時書き込む問題が原因（別課題）
+   - **結論: パッチは不要**。除去してupstream状態に戻した
 6. RTP送信制御によるFIFO蓄積防止 — 完了 (2026-03-17)
    - **原因特定**: マイクOFF中もブラウザがsilenceフレームをRTP送信 → go2rtc → backchannel.sh(dd) → FIFOにデータ蓄積（最大1MB≒131秒分）→ マイクON時にastream起動で蓄積データに直面
    - `webrtc.html`: `addTransceiver(micTrack)` → `addTransceiver('audio')` に変更（nullトラックで開始、RTP送信なし）
@@ -148,15 +149,14 @@ ssh atomcam 'echo "astream stop" | nc localhost 4000'
 - `audio_stream.c`: バイト数ベーススキップ（8000B→2000B） → go2rtcからのデータ供給がリアルタイムなのでリアルタイムデータまで読み捨ててしまい音が出なくなる、取りやめ
 - `audio_stream.c`: スキップ完全除去（FIFOフラッシュのみ） → ホットデプロイが効かず検証未完了
 
-#### 現在の状態 (2026-03-17)
-- SDデプロイ済み、起動OK、音OK
-- go2rtcバッファ削減パッチ適用済み（128→5パケット）
-- **Mac→ATOM音声遅延: 1秒以下**（初回・2回目とも）
-- astream計測値: 初回total_ms=51ms、2回目total_ms=18ms
-- ATOM起動直後のみRTSP接続タイムアウト（約30秒）で映像遅延あり（運用上許容）
+#### 現在の状態 (2026-03-18)
+- go2rtcバッファパッチは不要と判断し除去。upstream状態（bufferSize=100）で運用
+- **Mac→ATOM音声遅延: 0.5〜1秒**（2回目セッション以降）
+- **1回目セッションの遅延問題が未解決**: ATOM起動後の最初のマイクONで大量のstaleデータがスピーカーバッファに流入（feed_retry=100/100）。2回目以降は正常
+- 原因: backchannel.sh（dd）がFIFOに常時書き込んでおり、astream未起動中にデータが蓄積される
 
 #### 次に試すべきアプローチ
-1. **go2rtcバッファパッチの効果検証** — バッファ128に戻して比較し、パッチが必要か判断
+1. **1回目セッションのFIFOバッファ蓄積問題の解決** — backchannel.shの書き込みタイミング制御、またはastream側のフラッシュ強化
 
 #### 成果
 - Mac→ATOM音声遅延: 1秒以下（初回・2回目とも）— 当初約5秒から大幅改善
@@ -167,7 +167,7 @@ ssh atomcam 'echo "astream stop" | nc localhost 4000'
 
 #### 課題
 - ATOM起動直後のRTSP接続タイムアウト（運用上許容、起動後安定すれば問題なし）
-- go2rtcバッファパッチ（128→5）の効果が未検証（パッチなしでも十分な可能性）
+- **1回目セッションのFIFOバッファ蓄積問題**: backchannel.sh（dd）がastream未起動中もFIFOに書き込み続け、最初のマイクON時にstaleデータが大量にスピーカーに流入する。2回目以降は正常
 
 ### フェーズ4+: 音質・その他の品質改善
 - エコーキャンセル（AEC）パラメータ調整（`IMP_AI_EnableAec()`は動作確認済み）
@@ -256,35 +256,67 @@ upstream release (Ver.2.5.5) のSDカードは2パーティション構成:
 - コピー後、`diskutil unmount /Volumes/ATOMTOOLS` と `diskutil unmount /Volumes/BOOT` の両方をアンマウント
 - `authorized_keys`は`docs/authorized_keys`からコピーすること
 
-### ビルド
-**重要**: libcallback.soのビルドは必ずDockerコンテナ内で行うこと。ホスト（Mac）上ではクロスコンパイルできない。詳細はプロジェクトルートの `build.md` を参照。
+### ビルド方法一覧
+
+**重要**: すべてのビルドはDockerコンテナ内で行う。ホスト（Mac）上ではクロスコンパイルできない。
 
 ```bash
-cd /Users/sasaki/GitHub/atomcam_tools
 docker start atomcam_tools-builder-1  # コンテナが停止している場合
-docker exec atomcam_tools-builder-1 sh /src/build_libcallback.sh
 ```
 
-### Webフロントエンドビルド（Setting.vue等を変更した場合）
+#### 1. フルビルド（カーネル + rootfs + 全パッケージ）
+初回ビルドやパッケージ追加・変更時に使用。成果物は `target/rootfs_hack.squashfs`。
+```bash
+# ホスト側（Mac）
+make              # Docker image pull + フルビルド
+make build-local  # Docker image更新なし
+```
+内部動作: `buildscripts/build_all` → buildroot make → `post_fakeroot.sh`（libcallback.so + web frontend）→ `post_image.sh`（squashfs生成）
+
+#### 2. libcallback.soのみ再ビルド
+`libcallback/*.c` を変更した場合。成果物は `libcallback/libcallback.so`（ホスト側に直接コピーされる）。
+```bash
+docker exec atomcam_tools-builder-1 sh /src/build_libcallback.sh
+```
+- クロスコンパイラ: `/atomtools/build/cross/mips-uclibc/bin/mipsel-ingenic-linux-uclibc-`（uClibc環境）
+- glibc版gcc（`mipsel-ingenic-linux-gnu-`）を使うとヘッダー不一致でエラーになる
+- 前提: フルビルドが一度実行済みであること（ビルドディレクトリが存在する必要がある）
+
+#### 3. squashfs簡易再構築（build_squashfs.sh）
+libcallback.so、スクリプト、HTML等を変更した場合の高速デプロイ用。成果物は `rootfs_hack_new.squashfs`。
+```bash
+docker exec atomcam_tools-builder-1 sh /src/build_squashfs.sh
+```
+前提:
+- `rootfs_hack_upstream.squashfs` がプロジェクトルートにあること（upstream releaseからコピーしたオリジナル）
+- `libcallback/libcallback.so` がビルド済みであること
+- go2rtcバイナリが buildroot output（`/atomtools/build/.../output/target/usr/bin/go2rtc`）にあること
+- Webフロントエンド（`web/frontend/`）がビルド済みであること
+
+#### 4. go2rtcの個別リビルド
+go2rtcパッチを変更した場合。`build_all`はパッケージの差分を検出して自動で`dirclean`→再ビルドするが、手動で行う場合:
+```bash
+docker exec -w /atomtools/build/buildroot-2016.02 atomcam_tools-builder-1 make go2rtc-dirclean
+docker exec -w /atomtools/build/buildroot-2016.02 atomcam_tools-builder-1 make go2rtc
+```
+- パッチファイル（`custompackages/package/go2rtc/0001-*.patch`〜）はgo2rtc v1.9.2（commit b2399f3）のソースに合わせること
+- 成果物: `/atomtools/build/.../output/target/usr/bin/go2rtc`
+
+#### 5. Webフロントエンドビルド（Setting.vue等を変更した場合）
 ```bash
 cd /Users/sasaki/GitHub/atomcam_tools/web
 rm -rf frontend
 ./node_modules/.bin/webpack --mode production --progress
 ```
 
-### デプロイ（squashfs再構築）
-`build_squashfs.sh`が全手順をまとめている。upstreamのsquashfsをベースに改修ファイルを上書きして再パックする。
-
+### 典型的なデプロイ手順（libcallback.so変更時）
 ```bash
 docker start atomcam_tools-builder-1
 docker exec atomcam_tools-builder-1 sh /src/build_libcallback.sh
 docker exec atomcam_tools-builder-1 sh /src/build_squashfs.sh
-# SDカードにコピー
 cp rootfs_hack_new.squashfs /Volumes/ATOMTOOLS/rootfs_hack.squashfs
-# MD5確認
-md5 /Volumes/ATOMTOOLS/rootfs_hack.squashfs
 md5 rootfs_hack_new.squashfs
-# アンマウント
+md5 /Volumes/ATOMTOOLS/rootfs_hack.squashfs
 diskutil unmount /Volumes/ATOMTOOLS
 diskutil unmount /Volumes/BOOT
 ```
@@ -294,8 +326,7 @@ diskutil unmount /Volumes/BOOT
 - **`lib32/modules/libcallback.so`にもコピーが必要**。iCameraはchroot内の`lib32`パスを参照する場合がある。`build_squashfs.sh`で`lib/modules`と`lib32/modules`の両方にコピーしている
 - **squashfs再構築時は必ず全ファイルをコピーすること**。libcallback.so、スクリプト、**Webフロントエンド（bundle*）**の3種を毎回コピーする。フロントエンドのコピーを忘れるとWebUIが動作しない
 - **ベースファイルは`rootfs_hack_upstream.squashfs`を使うこと**。これはupstream releaseからコピーしたオリジナル。`rootfs_hack_new.squashfs`（出力ファイル）をベースにすると、ゴミが蓄積して起動不能になる
-- **squashfsの圧縮形式は必ず gzip を使うこと**（`-comp gzip`）。カメラのカーネルがxzをサポートしていないため
-- **squashfsの圧縮形式は必ず gzip を使うこと**（`-comp gzip`）。元のrootfs_hack.squashfsがgzip圧縮であり、カメラのカーネルがxzをサポートしていないため、xzで構築すると起動しない。
+- **squashfsの圧縮形式は必ず gzip を使うこと**（`-comp gzip`）。カメラのカーネルがxzをサポートしていないため、xzで構築すると起動しない
 - デプロイ前に `rootfs_hack.squashfs` のバックアップを推奨
 - SDカードをATOMに戻して電源ONで反映される
 - SSH接続には `~/.ssh/config` に以下の設定が必要（OpenSSH 10.x + ATOMのOpenSSH 7.1の互換性問題）:
@@ -341,3 +372,4 @@ libcallback.soだけでなくスクリプトやHTMLも忘れずにコピーす�
 - 2026-03-17: フェーズ4ステップ2完了: マイクボタンによるastream制御。Mac→ATOM遅延約2秒（FIFOフラッシュで10秒→2秒に改善）。マイクOFF時load 3.72、ON時load 4.00。hack_ini.cgiのCONFIG_VER消失バグも修正
 - 2026-03-17: フェーズ4ステップ3完了: ブラウザ側AEC/NS/AGC無効化（音質改善、遅延効果は軽微）。feed_pcmリトライ間隔短縮は効果なく取りやめ
 - 2026-03-17: フェーズ4ステップ4完了: 遅延計測＋初期バーストスキップ。astream側遅延ゼロ確認、起動時バースト対策で約2秒→約1秒に改善。残り1秒はWebRTC/go2rtc区間
+- 2026-03-18: go2rtcバッファパッチ(0005)を除去。bufferSize=5 vs 100を比較し、パッチは不要と結論。ビルド手順を精査・整理。1回目セッションのFIFOバッファ蓄積問題を新たに特定（backchannel.shの常時書き込みが原因）
