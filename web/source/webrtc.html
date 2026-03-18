@@ -48,14 +48,111 @@
         0%, 100% { opacity: 0.4; }
         50% { opacity: 0.9; }
       }
+
+      #vol-controls {
+        position: fixed;
+        bottom: 20px;
+        left: 20px;
+        z-index: 10;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .vol-btn {
+        width: 56px;
+        height: 56px;
+        border-radius: 50%;
+        border: none;
+        background: rgba(255,255,255,0.15);
+        cursor: pointer;
+        opacity: 0.8;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .vol-btn:hover { opacity: 1; }
+      .vol-btn:active { background: rgba(255,255,255,0.3); }
+      .vol-btn svg {
+        width: 24px;
+        height: 24px;
+        fill: white;
+      }
     </style>
   </head>
   <body>
     <video id="video" autoplay playsinline muted></video>
+    <div id="vol-controls">
+      <button id="vol-icon-btn" class="vol-btn"></button>
+      <button id="vol-down" class="vol-btn"><svg viewBox="0 0 24 24"><path d="M19 13H5v-2h14v2z"/></svg></button>
+      <button id="vol-up" class="vol-btn"><svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg></button>
+    </div>
     <div id="controls" style="display:none">
       <button id="mic-btn" class="off" title="Microphone OFF"></button>
     </div>
     <script>
+      var video = document.getElementById('video');
+      var volIconBtn = document.getElementById('vol-icon-btn');
+      var volDown = document.getElementById('vol-down');
+      var volUp = document.getElementById('vol-up');
+      var volume = 1.0;
+      var prevVolume = 0.5;
+      var VOL_KEY = 'webrtc_volume';
+
+      var speakerBase = '<path d="M3 9v6h4l5 5V4L7 9H3z"/>';
+      var wave1 = '<path d="M14 8.5a4.5 4.5 0 0 1 0 7" fill="none" stroke="white" stroke-width="1.5" stroke-linecap="round"/>';
+      var wave2 = '<path d="M15.5 5.5a8 8 0 0 1 0 13" fill="none" stroke="white" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>';
+      var wave3 = '<path d="M17 3a11 11 0 0 1 0 18" fill="none" stroke="white" stroke-width="1.5" stroke-linecap="round" opacity="0.4"/>';
+      var muteX = '<line x1="15" y1="8" x2="21" y2="16" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="21" y1="8" x2="15" y2="16" stroke="white" stroke-width="2" stroke-linecap="round"/>';
+      var volIcons = [
+        '<svg viewBox="0 0 24 24">' + speakerBase + muteX + '</svg>',
+        '<svg viewBox="0 0 24 24">' + speakerBase + '</svg>',
+        '<svg viewBox="0 0 24 24">' + speakerBase + wave1 + '</svg>',
+        '<svg viewBox="0 0 24 24">' + speakerBase + wave1 + wave2 + '</svg>',
+        '<svg viewBox="0 0 24 24">' + speakerBase + wave1 + wave2 + wave3 + '</svg>'
+      ];
+
+      function loadVolume() {
+        try {
+          var saved = localStorage.getItem(VOL_KEY);
+          if (saved !== null) volume = parseFloat(saved);
+        } catch(e) {}
+      }
+
+      function saveVolume() {
+        try { localStorage.setItem(VOL_KEY, volume); } catch(e) {}
+      }
+
+      function applyVolume() {
+        video.volume = volume;
+        video.muted = (volume === 0);
+        var idx = volume === 0 ? 0 : Math.ceil(volume * 4);
+        volIconBtn.innerHTML = volIcons[idx];
+        saveVolume();
+      }
+
+      volIconBtn.addEventListener('click', function() {
+        if (volume > 0) {
+          prevVolume = volume;
+          volume = 0;
+        } else {
+          volume = prevVolume > 0 ? prevVolume : 0.25;
+        }
+        applyVolume();
+      });
+
+      volDown.addEventListener('click', function() {
+        volume = Math.max(0, Math.round((volume - 0.25) * 100) / 100);
+        applyVolume();
+      });
+
+      volUp.addEventListener('click', function() {
+        volume = Math.min(1, Math.round((volume + 0.25) * 100) / 100);
+        applyVolume();
+      });
+
+      loadVolume();
+      applyVolume();
+
       const GO2RTC_PORT = 1984;
       const AUDIO_FIFO = '/tmp/audio_in.fifo';
       const DEFAULT_VOL = 40;
