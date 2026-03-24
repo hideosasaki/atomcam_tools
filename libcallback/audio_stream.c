@@ -199,9 +199,13 @@ char *AudioStream(int fd, char *tokenPtr) {
   if(!strcmp(p, "stop")) {
     if(!streamRunning) return "ok";
     streamRunning = 0;
-    // FIFOのブロッキングread解除のためにダミー書き込み
+    // FIFOのブロッキングread解除のためにダミーデータ書き込み
     int wfd = open(streamPath, O_WRONLY | O_NONBLOCK);
-    if(wfd >= 0) close(wfd);
+    if(wfd >= 0) {
+      unsigned char dummy = 0;
+      write(wfd, &dummy, 1);
+      close(wfd);
+    }
     pthread_join(streamThread, NULL);
     return "ok";
   }

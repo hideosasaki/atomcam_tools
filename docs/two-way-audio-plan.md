@@ -16,10 +16,11 @@ AtomCamの公式アプリでサポートされている双方向会話機能を�
 - Web UI統合（Setting.vueにマイク制御UI追加）
 
 ### 未実装
-- 音質改善
+- ~~音質改善~~ → 検証済み: 16kHz PCMを`feed_pcm_data()`に送るとスピーカーバッファが飽和しドレイン発動で音が出ない。**サンプルレートは8kHz固定（SDK制約）**。改善余地はffmpegリサンプラー品質パラメータ程度
 - go2rtcバッファパッチの効果検証（現在upstreamバッファサイズに戻して検証中）
 - PCMパスのdrain誤検出修正（フェーズ4のdrain機構追加以降、catやffmpegパイプでのPCM再生が動作しない）
 - HA media_player: マイク入力のHA統合（将来検討）
+- HA media_player: 真のストリーミング対応（現在は一括POST、lighttpdのContent-Length必須制約あり）
 
 ## アーキテクチャ（実装済み）
 ```
@@ -460,6 +461,9 @@ HA TTS → media_player.play_media(media-source://tts/...)
 - [x] HA開発者ツール → サービス → media_player.play_media でTTS再生 → OK
 - [x] SD デプロイ後、手動chmod不要でFIFOパーミッション自動設定 → OK
 
+#### 今後の検討事項
+- **真のストリーミング対応**: 現在はPCM全体をメモリに読み込んでから一括POST。長時間音声やリアルタイム性が必要な場合、chunked transfer encodingへの移行を検討。ただしlighttpdのCGIがContent-Lengthなしだとデータを正しく渡せない制約があるため、カメラ上に軽量HTTPサーバー追加等の別アプローチが必要。TTS用途（数秒〜十数秒）では現方式で十分
+
 ## 技術メモ
 
 ### 重要なファイル
@@ -690,4 +694,6 @@ libcallback.soだけでなくスクリプトやHTMLも忘れずにコピーす�
   2. **Content-Length必須**: lighttpdのCGIはContent-Lengthなしだとstdinに最初のチャンクしか渡さない → aiohttp POSTにContent-Lengthヘッダ明示
   3. **media-source:// URI解決**: HAのTTSはmedia-source://スキームで渡す → async_resolve_mediaで実HTTP URLに変換
   4. **cmd.cgi astream開始のブロッキング**: astreamはFIFOデータ終了まで返らない → asyncio.create_taskで非同期実行
+- 2026-03-24: astream stop ハング修正。ダミーopen→ダミーwrite(1バイト)に変更し、read()のブロック解除を確実に
+- 2026-03-24: 音質改善検証。16kHz PCMをfeed_pcm_data()に送信 → スピーカーバッファ飽和でドレイン発動、音が出ない。**サンプルレートは8kHz固定（SDK制約）**と確定
 - 2026-03-24: RTSP Subストリーム(video1)による負荷軽減を検証。ATOM CamのSubストリームはハードウェアエンコーダがH.265(HEVC)で出力しており、go2rtcはH.265パススルーでWebRTCに送出するが、Chrome/SafariともにWebRTCでのH.265デコードに対応しておらず映像表示不可。go2rtcログで`media=video, recvonly, H265`のマッチは確認できたがブラウザ側で描画されない。ffmpegトランスコード(H.265→H.264)はT31 CPUで逆効果のため断念。**結論: ATOM CamのSubストリーム(H.265)はWebRTC配信に使用不可。負荷軽減は別アプローチが必要**
