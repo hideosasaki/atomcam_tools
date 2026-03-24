@@ -1,0 +1,20 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "ATOMCam Speaker Setup",
+        "data": {
+          "host": "Camera IP address",
+          "base_url": "Caddy proxy URL (optional)"
+        },
+        "data_description": {
+          "host": "IP address of the ATOM camera (e.g. 192.168.0.12)",
+          "base_url": "If using Caddy reverse proxy, enter its URL (e.g. https://home.example.ts.net)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the camera. Please check the IP address and network."
+    }
+  }
+}

@@ -110,6 +110,7 @@ WEBRTC_ENABLE=$(awk -F "=" '/^WEBRTC_ENABLE *=/ {print $2}' $HACK_INI)
 # backchannel: FIFO preparation (astream is started/stopped by mic button in webrtc.html)
 if [ "$WEBRTC_ENABLE" = "on" ]; then
   [ ! -p /tmp/audio_in.fifo ] && mkfifo /tmp/audio_in.fifo
+  chmod 666 /tmp/audio_in.fifo
   sleep 86400 <> /tmp/audio_in.fifo &
   /scripts/cmd audio aec on > /dev/null
 fi

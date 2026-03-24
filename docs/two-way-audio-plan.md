@@ -19,6 +19,7 @@ AtomCamの公式アプリでサポートされている双方向会話機能を�
 - 音質改善
 - go2rtcバッファパッチの効果検証（現在upstreamバッファサイズに戻して検証中）
 - PCMパスのdrain誤検出修正（フェーズ4のdrain機構追加以降、catやffmpegパイプでのPCM再生が動作しない）
+- HA media_player: マイク入力のHA統合（将来検討）
 
 ## アーキテクチャ（実装済み）
 ```
@@ -285,8 +286,7 @@ pihole Local DNS: home.barn-alpha.ts.net → 192.168.0.2（LAN内はLAN IP直接
 | `~/homeassistant/home.barn-alpha.ts.net.crt` | Tailscale HTTPS証明書 |
 | `~/homeassistant/home.barn-alpha.ts.net.key` | Tailscale HTTPS秘密鍵 |
 | `~/homeassistant/config/configuration.yaml` | HA設定（trusted_proxies: 127.0.0.1, ::1, 100.64.0.0/10） |
-| `~/homeassistant/config/www/atomcam-card.js` | HAカスタムカード（デプロイ先） |
-| `~/homeassistant/config/www/fullscreen.html` | Fully Kiosk Browser用ページ（デプロイ先） |
+| `~/atomcam/atomcam.html` | Fully Kiosk Browser用ページ（デプロイ先） |
 
 #### Tailscale HTTPS証明書の取得・配置
 ```bash
@@ -417,6 +417,49 @@ home.barn-alpha.ts.net {
 - nginx除去（停止中だが未削除）
 - pihole Docker化
 
+### フェーズ7: HA media_playerカスタムコンポーネント — 完了 (2026-03-24)
+**目標**: ATOMCamのスピーカーをHA標準のmedia_playerエンティティとして登録し、HAのTTSサービスから音声を再生できるようにする
+
+#### アーキテクチャ
+```
+HA TTS → media_player.play_media(media-source://tts/...)
+  → async_resolve_media() → HTTP URL取得
+  → aiohttp GET: MP3/WAVダウンロード → 一時ファイル
+  → ffmpeg: MP3/WAV → raw PCM (s16le, 8kHz, mono) → 一時ファイル
+  → cmd.cgi POST: astream /tmp/audio_in.fifo <volume> (asyncio.create_task、非同期)
+  → stream.cgi POST: PCMデータ (Content-Length必須)
+  → stream.cgi: cat > /tmp/audio_in.fifo
+  → astream: FIFO → speaker
+```
+
+#### 実装ファイル
+| ファイル | 役割 |
+|---------|------|
+| `homeassistant/custom_components/atomcam/manifest.json` | HAコンポーネント定義 |
+| `homeassistant/custom_components/atomcam/__init__.py` | エントリポイント |
+| `homeassistant/custom_components/atomcam/const.py` | 定数定義 |
+| `homeassistant/custom_components/atomcam/config_flow.py` | 設定フロー（host, base_url） |
+| `homeassistant/custom_components/atomcam/media_player.py` | media_playerエンティティ |
+| `homeassistant/custom_components/atomcam/strings.json` | UI文字列 |
+| `homeassistant/custom_components/atomcam/translations/` | 翻訳（en, ja） |
+| `overlay_rootfs/var/www/cgi-bin/stream.cgi` | PCM受信→FIFO書き込みCGI |
+
+#### カメラ側の変更
+1. **stream.cgi**: HTTP POSTのbody（raw PCM）をFIFOに書き込むCGI
+2. **rtspserver.sh**: FIFO作成後に`chmod 666`追加（lighttpd www-dataユーザーからの書き込み許可）
+3. **build_squashfs.sh**: stream.cgiのコピーステップ追加
+
+#### 解決した技術課題
+1. **SSH vs HTTP**: 当初SSH経由でFIFOにデータを送る方式で実装したが、HAコンテナからのdocker exec経由のstdinパイプでデータが届かない問題があり、HTTP POST（stream.cgi）方式に変更
+2. **FIFO権限**: lighttpdがwww-dataで実行されるため、root所有のFIFO(prw-r--r--)に書き込めない → rtspserver.shでchmod 666
+3. **Content-Length必須**: lighttpdのCGIはContent-Lengthなしだとstdinのデータを正しく渡さない（最初のチャンクのみ）
+4. **media-source:// URI**: HAのTTSはmedia-source://スキームのURIを渡す → `async_resolve_media()`で実HTTPのURLに変換
+5. **astream開始のブロッキング**: cmd.cgiへのastream開始POSTはFIFOデータ終了まで応答しない → `asyncio.create_task()`で非同期実行
+
+#### 動作確認
+- [x] HA開発者ツール → サービス → media_player.play_media でTTS再生 → OK
+- [x] SD デプロイ後、手動chmod不要でFIFOパーミッション自動設定 → OK
+
 ## 技術メモ
 
 ### 重要なファイル
@@ -435,7 +478,9 @@ home.barn-alpha.ts.net {
 | `web/source/vue/i18n-en.yaml` | 英語ローカライズ |
 | `custompackages/package/go2rtc/go2rtc.mk` | go2rtc v1.9.2ビルド設定 |
 | `homeassistant/atomcam-card.js` | HAカスタムカード（WebRTC直接接続、Caddy経由同一オリジン） |
-| `homeassistant/fullscreen.html` | Fully Kiosk Browser用フルスクリーンページ |
+| `homeassistant/atomcam.html` | Fully Kiosk Browser用フルスクリーンページ |
+| `homeassistant/custom_components/atomcam/` | HA media_playerカスタムコンポーネント（TTS→スピーカー再生） |
+| `overlay_rootfs/var/www/cgi-bin/stream.cgi` | PCMデータ受信→FIFO書き込みCGI |
 
 ### スピーカー出力API
 ```c
@@ -640,3 +685,9 @@ libcallback.soだけでなくスクリプトやHTMLも忘れずにコピーす�
   8. **fullscreen.html作成**: Fully Kiosk Browser用のフルスクリーンページ。音量ボタン廃止、マイクON=音量100%/OFF=ミュートのシンプルUI。大きなマイクボタン(112px)
   9. **ATOMスピーカー音量**: DEFAULT_VOL=40→100に変更（local_sdk_speaker_set_volume、範囲0-100）
   10. **Caddyfile handle→handle_path移行**: 末尾スラッシュなしURL(/atomcam, /dvd等)の404問題を修正
+- 2026-03-24: フェーズ7: HA media_playerカスタムコンポーネント実装。ATOMCamスピーカーをHA標準media_playerエンティティとして登録し、TTS音声再生に対応。SSH不要のHTTPのみの方式を採用（cmd.cgiでastream開始、stream.cgiにContent-Length付きPCM POST）。実装過程で以下の問題を特定・解決:
+  1. **stream.cgi FIFO書き込み権限**: lighttpdがwww-dataで実行されるためFIFO(root:root prw-r--r--)に書き込めない → rtspserver.shでchmod 666を追加
+  2. **Content-Length必須**: lighttpdのCGIはContent-Lengthなしだとstdinに最初のチャンクしか渡さない → aiohttp POSTにContent-Lengthヘッダ明示
+  3. **media-source:// URI解決**: HAのTTSはmedia-source://スキームで渡す → async_resolve_mediaで実HTTP URLに変換
+  4. **cmd.cgi astream開始のブロッキング**: astreamはFIFOデータ終了まで返らない → asyncio.create_taskで非同期実行
+- 2026-03-24: RTSP Subストリーム(video1)による負荷軽減を検証。ATOM CamのSubストリームはハードウェアエンコーダがH.265(HEVC)で出力しており、go2rtcはH.265パススルーでWebRTCに送出するが、Chrome/SafariともにWebRTCでのH.265デコードに対応しておらず映像表示不可。go2rtcログで`media=video, recvonly, H265`のマッチは確認できたがブラウザ側で描画されない。ffmpegトランスコード(H.265→H.264)はT31 CPUで逆効果のため断念。**結論: ATOM CamのSubストリーム(H.265)はWebRTC配信に使用不可。負荷軽減は別アプローチが必要**

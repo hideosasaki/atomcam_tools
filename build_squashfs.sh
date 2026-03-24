@@ -17,6 +17,10 @@ cp /src/overlay_rootfs/scripts/rtspserver.sh /tmp/squashfs-root/scripts/rtspserv
 # hack_ini.cgi (CONFIG_VER fix)
 cp /src/overlay_rootfs/var/www/cgi-bin/hack_ini.cgi /tmp/squashfs-root/var/www/cgi-bin/hack_ini.cgi
 
+# stream.cgi (PCM audio streaming for HA media_player)
+cp /src/overlay_rootfs/var/www/cgi-bin/stream.cgi /tmp/squashfs-root/var/www/cgi-bin/stream.cgi
+chmod +x /tmp/squashfs-root/var/www/cgi-bin/stream.cgi
+
 # go2rtc (rebuilt with reduced audio buffer)
 cp /atomtools/build/buildroot-2016.02/output/target/usr/bin/go2rtc /tmp/squashfs-root/usr/bin/go2rtc
 
