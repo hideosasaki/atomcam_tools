@@ -146,8 +146,10 @@ static void *AudioStreamThread(void *arg) {
       }
 
       // If feed needed retries, speaker buffer is congested.
-      // Flush everything and enter drain mode.
-      if(retries > 0 && !firstFeed) {
+      // Flush everything and enter drain mode (alaw/backchannel only).
+      // PCM mode (stream.cgi etc.) sends data in bursts, so drain would
+      // discard valid audio data.
+      if(streamAlaw && retries > 0 && !firstFeed) {
         local_sdk_speaker_clean_buf_data();
         int flags = fcntl(fd, F_GETFL, 0);
         fcntl(fd, F_SETFL, flags | O_NONBLOCK);

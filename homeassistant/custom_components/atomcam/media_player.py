@@ -221,6 +221,10 @@ class AtomCamMediaPlayer(MediaPlayerEntity):
             self._attr_state = MediaPlayerState.PLAYING
             self.async_write_ha_state()
 
+            # Stop any previous astream session
+            await self._send_cmd("astream stop")
+            await asyncio.sleep(0.3)
+
             # Start astream on camera via cmd.cgi (non-blocking, it blocks until FIFO ends)
             _LOGGER.debug("Starting astream (volume=%s)", volume)
             astream_task = asyncio.create_task(
@@ -234,12 +238,18 @@ class AtomCamMediaPlayer(MediaPlayerEntity):
             _LOGGER.debug("POSTing %d bytes of PCM to stream.cgi", len(pcm_data))
             await self._post_pcm(pcm_data)
 
-            # Wait for astream to finish
+            # Wait for astream to finish (FIFO EOF)
             try:
                 await asyncio.wait_for(astream_task, timeout=10)
             except asyncio.TimeoutError:
                 _LOGGER.warning("astream did not finish in time")
                 astream_task.cancel()
+
+            # Wait for speaker to finish playing buffered data
+            # 19584 bytes = ~1.2s of audio at 8kHz/16bit/mono
+            play_duration = len(pcm_data) / (8000 * 2)
+            _LOGGER.debug("Waiting %.1fs for speaker to finish", play_duration)
+            await asyncio.sleep(play_duration + 0.5)
 
             self._playing = False
             self._attr_state = MediaPlayerState.IDLE
