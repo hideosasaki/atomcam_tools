@@ -196,47 +196,48 @@ class AtomCamMediaPlayer(MediaPlayerEntity):
         self, media_type: MediaType, media_id: str, **kwargs
     ) -> None:
         """Play media on the ATOMCam speaker."""
+        import time as _time
+        _t0 = _time.monotonic()
         _LOGGER.info("play_media: type=%s, id=%s", media_type, media_id)
 
         media_id = await self._resolve_media_url(media_id)
-        _LOGGER.debug("Resolved media URL: %s", media_id)
+        _LOGGER.debug("[%.3fs] Resolved media URL: %s", _time.monotonic() - _t0, media_id)
 
         tmpdir = await self._hass.async_add_executor_job(self._make_tmpdir)
         try:
             input_file = os.path.join(tmpdir, "input")
             pcm_file = os.path.join(tmpdir, "output.pcm")
 
-            _LOGGER.debug("Downloading media from %s", media_id)
-            if not await self._download_media(media_id, input_file):
+            # Download + astream stop in parallel
+            dl_task = asyncio.create_task(self._download_media(media_id, input_file))
+            stop_task = asyncio.create_task(self._send_cmd("astream stop"))
+            dl_ok = await dl_task
+            await stop_task
+            if not dl_ok:
                 return
+            _LOGGER.debug("[%.3fs] Download + astream stop done", _time.monotonic() - _t0)
 
-            _LOGGER.debug("Converting to PCM")
-            if not await self._convert_to_pcm(input_file, pcm_file):
+            # ffmpeg conversion + astream start in parallel
+            convert_task = asyncio.create_task(self._convert_to_pcm(input_file, pcm_file))
+            volume = int(self._attr_volume_level * 100)
+            astream_task = asyncio.create_task(
+                self._send_cmd(f"astream /tmp/audio_in.fifo {volume}")
+            )
+            if not await convert_task:
                 return
+            _LOGGER.debug("[%.3fs] PCM conversion complete", _time.monotonic() - _t0)
 
             pcm_data = await self._hass.async_add_executor_job(self._read_file, pcm_file)
-            volume = int(self._attr_volume_level * 100)
 
             self._playing = True
             self._attr_state = MediaPlayerState.PLAYING
             self.async_write_ha_state()
-
-            # Stop any previous astream session
-            await self._send_cmd("astream stop")
-            await asyncio.sleep(0.3)
-
-            # Start astream on camera via cmd.cgi (non-blocking, it blocks until FIFO ends)
-            _LOGGER.debug("Starting astream (volume=%s)", volume)
-            astream_task = asyncio.create_task(
-                self._send_cmd(f"astream /tmp/audio_in.fifo {volume}")
-            )
-
-            # Small delay to let astream open the FIFO reader
-            await asyncio.sleep(0.5)
+            _LOGGER.debug("[%.3fs] Ready to POST", _time.monotonic() - _t0)
 
             # POST PCM data to stream.cgi
             _LOGGER.debug("POSTing %d bytes of PCM to stream.cgi", len(pcm_data))
             await self._post_pcm(pcm_data)
+            _LOGGER.debug("[%.3fs] POST complete", _time.monotonic() - _t0)
 
             # Wait for astream to finish (FIFO EOF)
             try:
