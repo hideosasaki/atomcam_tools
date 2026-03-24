@@ -251,6 +251,9 @@ class AtomCamMediaPlayer(MediaPlayerEntity):
             _LOGGER.debug("Waiting %.1fs for speaker to finish", play_duration)
             await asyncio.sleep(play_duration + 0.5)
 
+            # Stop astream to release the thread (FIFO keeper prevents EOF)
+            await self._send_cmd("astream stop")
+
             self._playing = False
             self._attr_state = MediaPlayerState.IDLE
             self.async_write_ha_state()
