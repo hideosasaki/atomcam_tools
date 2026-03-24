@@ -7,13 +7,13 @@
   body { background:black; margin:0; padding:0; }
   html, body, video { height:100%; width:100%; }
   #controls {
-    position:fixed; bottom:30px; left:50%; transform:translateX(-50%);
+    position:fixed; top:20px; left:20px;
     z-index:10;
   }
   #mic-btn {
     width:112px; height:112px; border-radius:50%; border:none;
     cursor:pointer; opacity:0.8; display:flex;
-    align-items:center; justify-content:center; background:#666;
+    align-items:center; justify-content:center; background:#03a9f4;
   }
   #mic-btn svg { width:48px; height:48px; fill:white; }
   #mic-btn:hover { opacity:1; }
@@ -46,9 +46,7 @@ function updateMicButton() {
 }
 
 function sendAstreamCmd(cmd) {
-  var params = new URLSearchParams(location.search);
-  var base = params.get('base_url') || '';
-  var url = base + '/cgi-bin/cmd.cgi?port=socket';
+  var url = '/cgi-bin/cmd.cgi?port=socket';
   return fetch(url, {
     method: 'POST',
     body: JSON.stringify({exec: cmd})
@@ -61,8 +59,7 @@ var ws = null;
 var retryDelay = 3000;
 var retryTimer = null;
 var disconnectTimer = null;
-var baseUrl = new URLSearchParams(location.search).get('base_url') || (location.protocol + '//' + location.host);
-var wsUrl = baseUrl + '/go2rtc/api/ws?src=video0';
+var wsUrl = location.protocol + '//' + location.host + '/go2rtc/api/ws?src=video0';
 
 function cleanup() {
   if (disconnectTimer) { clearTimeout(disconnectTimer); disconnectTimer = null; }
@@ -203,9 +200,9 @@ micBtn.addEventListener('click', function() {
 
     if (!micTrack) {
       navigator.mediaDevices.getUserMedia({audio: {
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
       }}).then(function(micStream) {
         micTrack = micStream.getTracks()[0];
         micTrack.enabled = false;
