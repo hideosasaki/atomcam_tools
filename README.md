@@ -18,7 +18,19 @@ WyzeCamV3の画面
 
 <br>
 
+## このForkで実現された機能
+
+- 双方向WebRTC音声通話
+
+  - WebRTC経由でブラウザからATOMCamのスピーカーへ音声を送信できます。ATOMCamのマイク音声もブラウザで受信可能です。
+  - go2rtcのバックチャネル機能を利用し、PCMA(a-law)でエンコードされた音声をFIFO経由でスピーカーに出力します。
+  - Home Assistantカスタムコンポーネント（media\_player）を提供。TTSでの音声再生にも対応しています。
+  - Fully Kiosk Browser向けのフルスクリーンHTMLプレーヤー（atomcam.html）を同梱しています。
+  - 音声仕様: 8kHz/16bit/mono（ATOMCam SDKの制約によりサンプルレートは8kHz固定）
+  - 詳細は [docs/two-way-audio.md](docs/two-way-audio.md) を参照してください。
+
 ## 実現される機能
+
 - WebUI (Port: 80)
   - ATOMCamのアプリから設定できない追加機能について設定します。
   - アカウントとパスワードを設定可能です。

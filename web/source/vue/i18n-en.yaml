@@ -293,9 +293,6 @@ RTMP:
 WebRTC:
   title: WebRTC
   tooltip: RTSP Main must be on.
-  twoWay:
-    title: Two-Way Audio
-    tooltip: Send audio from browser microphone to ATOM speaker. HTTPS access required.
   URL:
     title: URL
     tooltip: Copy and paste this URL into browser.

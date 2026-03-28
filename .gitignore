@@ -2,7 +2,11 @@
 factory_t31_ZMC6tiIDQN
 rootfs_hack.ext2
 rootfs_hack.squashfs
+*.squashfs
 atomcam_tools.zip
+*.so
+go2rtc_original
+go2rtc_patched
 *.xcodeproj/project.xcworkspace/
 *.xcodeproj/xcuserdata/
 *.xcodeproj/xcshareddata/

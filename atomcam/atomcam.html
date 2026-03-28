@@ -12,12 +12,15 @@
   }
   #mic-btn {
     width:112px; height:112px; border-radius:50%; border:none;
-    cursor:pointer; opacity:0.8; display:flex;
+    cursor:pointer; opacity:0.6; display:flex;
     align-items:center; justify-content:center; background:#03a9f4;
   }
   #mic-btn svg { width:48px; height:48px; fill:white; }
   #mic-btn:hover { opacity:1; }
-  #mic-btn.on { background:#bc423a; }
+  #mic-btn.on {
+    background:#bc423a;
+    opacity:1.0;
+  }
 </style>
 </head>
 <body>
@@ -30,10 +33,11 @@ var video = document.getElementById('video');
 
 // Mic
 var AUDIO_FIFO = '/tmp/audio_in.fifo';
-var DEFAULT_VOL = 100;
+var DEFAULT_VOL = 80;
 var micTrack = null;
 var micSender = null;
 var micEnabled = false;
+var micAutoOffTimer = null;
 var micBtn = document.getElementById('mic-btn');
 var micOnIcon = '<svg viewBox="0 0 24 24"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>';
 var micOffIcon = '<svg viewBox="0 0 24 24"><path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5c0-1.66-1.34-3-3-3S9 3.34 9 5v.18l5.98 5.99zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z"/></svg>';
@@ -63,6 +67,7 @@ var wsUrl = location.protocol + '//' + location.host + '/go2rtc/api/ws?src=video
 
 function cleanup() {
   if (disconnectTimer) { clearTimeout(disconnectTimer); disconnectTimer = null; }
+  if (micAutoOffTimer) { clearTimeout(micAutoOffTimer); micAutoOffTimer = null; }
   if (micEnabled) {
     micEnabled = false;
     if (micSender) micSender.replaceTrack(null);
@@ -174,6 +179,7 @@ function connect() {
 micBtn.addEventListener('click', function() {
   if (!pc) return;
   if (micEnabled) {
+    if (micAutoOffTimer) { clearTimeout(micAutoOffTimer); micAutoOffTimer = null; }
     micEnabled = false;
     if (micSender) micSender.replaceTrack(null);
     if (micTrack) micTrack.enabled = false;
@@ -195,6 +201,11 @@ micBtn.addEventListener('click', function() {
         video.volume = 1.0;
         updateMicButton();
         micBtn.style.opacity = '0.8';
+        if (micAutoOffTimer) clearTimeout(micAutoOffTimer);
+        micAutoOffTimer = setTimeout(function() {
+          micAutoOffTimer = null;
+          if (micEnabled) micBtn.click();
+        }, 60000);
       });
     }
 

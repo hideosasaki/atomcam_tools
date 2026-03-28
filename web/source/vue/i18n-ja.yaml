@@ -294,9 +294,6 @@ RTMP:
 WebRTC:
   title: WebRTC
   tooltip: RTSP Mainをonにする必要があります
-  twoWay:
-    title: 双方向会話
-    tooltip: ブラウザのマイクからATOMのスピーカーに音声を送信します。HTTPSでのアクセスが必要です
   URL:
     title: URL
     tooltip: ブラウザーにURLをcopy&pasteしてください

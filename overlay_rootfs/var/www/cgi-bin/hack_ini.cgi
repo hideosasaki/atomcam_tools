@@ -8,7 +8,6 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
   awk '
   BEGIN {
     RS="[{},]";
-    print "CONFIG_VER=1.0.1";
   }
   /^$/ { next; }
   /^appver/ { next; }
@@ -17,7 +16,6 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
   /^KERNELVER/ { next; }
   /^ATOMHACKVER/ { next; }
   /^HWADDR/ { next; }
-  /^CONFIG_VER/ { next; }
   {
     gsub(/\"[ \t]*:[ \t]*\"?/, "=");
     gsub(/\"/, "");
