@@ -124,11 +124,18 @@ function connect() {
     }
   });
 
-  var tracks = ['video', 'audio'].map(function(kind) {
-    return pc.addTransceiver(kind, {direction: 'recvonly'}).receiver.track;
+  ['video', 'audio'].forEach(function(kind) {
+    pc.addTransceiver(kind, {direction: 'recvonly'});
   });
-  var stream = new MediaStream(tracks);
+  var stream = new MediaStream();
   video.srcObject = stream;
+
+  pc.addEventListener('track', function(ev) {
+    stream.addTrack(ev.track);
+    if (ev.track.kind === 'video') {
+      video.play().catch(function() {});
+    }
+  });
 
   // Pre-create sendonly transceiver for mic
   var sendTransceiver = pc.addTransceiver('audio', {direction: 'sendonly'});
